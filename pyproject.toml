@@ -1,0 +1,39 @@
+[build-system]
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
+
+[project]
+name = "xnb"
+dynamic = ["version"]
+description = "Run notebooks and scripts on sandboxed xeus wasm kernels (emscripten-forge) inside headless Chromium"
+readme = "README.md"
+requires-python = ">=3.9"
+license = "BSD-3-Clause"
+dependencies = [
+    "typer>=0.12",
+    "typing_extensions>=4.6",
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Framework :: Jupyter",
+    "Topic :: Security",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=7", "nbformat>=5"]
+
+[project.scripts]
+xnb = "xnb.cli:main"
+
+[tool.hatch.version]
+path = "xnb/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["xnb"]
+artifacts = ["xnb/_web/**"]
+
+[tool.hatch.build.targets.sdist]
+include = ["xnb", "web/src", "web/build.mjs", "web/package.json", "web/package-lock.json", "web/tsconfig.json", "hatch_build.py", "tests", "README.md", "PLAN.md"]
+
+[tool.hatch.build.hooks.custom]
+path = "hatch_build.py"

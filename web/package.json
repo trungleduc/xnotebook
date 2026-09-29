@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "build": "node build.mjs",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node test/run.mjs"
   },
   "dependencies": {
     "@emscripten-forge/mambajs": "0.23.0",
