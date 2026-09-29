@@ -1,15 +1,24 @@
+import re
+
 from xnotebook.cli import main
+
+ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
+def plain(text: str) -> str:
+    """Help output is coloured when the environment forces it (e.g. on CI)."""
+    return ANSI.sub("", text)
 
 
 def test_help(capsys):
     assert main(["--help"]) == 0
-    out = capsys.readouterr().out
+    out = plain(capsys.readouterr().out)
     assert "run" in out and "setup" in out and "cache" in out
 
 
 def test_run_help_is_default_command(capsys):
     assert main(["run", "--help"]) == 0
-    out = capsys.readouterr().out
+    out = plain(capsys.readouterr().out)
     for flag in ("--env", "--dep", "--pip", "--mount", "--offline", "--strict", "--cell-timeout"):
         assert flag in out
 
@@ -31,7 +40,8 @@ def test_inplace_requires_notebook(tmp_path, capsys):
 
 
 def test_bad_option(capsys):
-    assert main(["x.ipynb", "--no-such-flag"]) != 0
+    assert main(["x.ipynb", "--no-such-flag"]) == 2
+    assert "no-such-flag" in plain(capsys.readouterr().err)
 
 
 def test_cache_info(tmp_path, capsys):

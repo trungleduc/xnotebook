@@ -284,23 +284,18 @@ def main(argv: Optional[List[str]] = None) -> int:
     # `xnb notebook.ipynb ...` -> `xnb run notebook.ipynb ...`
     if argv and argv[0] not in COMMANDS and argv[0] not in ("-h", "--help", "--version"):
         argv = ["run", *argv]
+    # Standalone mode lets Typer print usage errors itself; every outcome ends in
+    # SystemExit, so we never need to import click (newer Typer vendors it).
     try:
-        rv = app(args=argv, prog_name="xnb", standalone_mode=False)
-    except typer.Exit as e:
-        return e.exit_code
-    except SystemExit as e:  # click usage errors in non-standalone mode
-        return int(e.code or 0)
-    except Exception as e:  # noqa: BLE001
-        import click
-
-        if isinstance(e, click.exceptions.ClickException):
-            e.show()
-            return e.exit_code
-        if isinstance(e, click.exceptions.Abort):
-            return 130
-        raise
-    return rv if isinstance(rv, int) else 0
-
+        app(args=argv, prog_name="xnb", standalone_mode=True)
+    except SystemExit as e:
+        if e.code is None:
+            return 0
+        if isinstance(e.code, int):
+            return e.code
+        sys.stderr.write(f"{e.code}\n")
+        return 1
+    return 0
 
 if __name__ == "__main__":
     sys.exit(main())
