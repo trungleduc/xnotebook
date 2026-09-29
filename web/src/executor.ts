@@ -160,6 +160,8 @@ export class KernelClient {
   dead: string | null = null;
   onDebug: (m: string) => void = () => {};
   onStdinExhausted: () => void = () => {};
+  /** Called for every kernel message, whatever request it belongs to. */
+  onAnyMessage: (msg: IKernelMessage) => void = () => {};
 
   constructor(public worker: Worker) {
     worker.addEventListener('message', ev => this.handle(ev.data));
@@ -186,6 +188,7 @@ export class KernelClient {
       return;
     }
     if (data && data.header) {
+      this.onAnyMessage(data as IKernelMessage);
       const parent = data.parent_header?.msg_id;
       const w = parent ? this.waiters.get(parent) : undefined;
       if (w) {

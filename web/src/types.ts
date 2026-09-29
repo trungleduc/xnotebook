@@ -31,6 +31,8 @@ export interface IJob {
   mounts: IMount[];
   allowErrors: boolean;
   cellTimeout?: number | null;
+  /** Save ipywidgets state in metadata.widgets (default true). */
+  widgetState?: boolean;
   /** Working directory of the kernel. */
   cwd?: string | null;
 }

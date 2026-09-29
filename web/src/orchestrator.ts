@@ -7,6 +7,7 @@ import { mergeEnv } from './deps';
 import { channelUrls, downloadAll, formatBytes, lockChannelUrls, lockFiles, solveEnv } from './solve';
 import { KernelClient, makeMessage, normalizeEname, OutputTracker } from './executor';
 import { parseNotebook, scriptToNotebook, sourceText } from './formats';
+import { WidgetStateTracker } from './widgets';
 import { IJob, INotebook, IRunResult, Output } from './types';
 
 async function fetchBytes(url: string): Promise<ArrayBuffer> {
@@ -121,6 +122,10 @@ async function execute(
   lock: ILock
 ): Promise<IRunResult> {
   const tracker = new OutputTracker((cell, output, kind) => emit({ kind: 'output', cell, output, mode: kind }));
+  const widgets = new WidgetStateTracker();
+  if (job.widgetState !== false) {
+    kernel.onAnyMessage = m => widgets.handle(m);
+  }
 
   // kernel_info for language_info
   const info = await kernel.request(makeMessage('kernel_info_request', {}), () => {}, 60_000);
@@ -226,6 +231,12 @@ async function execute(
     });
   }
   void lock;
+  if (job.widgetState !== false) {
+    widgets.saveTo(nb);
+    if (widgets.size) {
+      step(`saved state of ${widgets.size} widget models`);
+    }
+  }
   return { notebook: nb, status, failedCell, error, mounts };
 }
 

@@ -35,6 +35,7 @@ def build_job(
     allow_errors: bool = False,
     cell_timeout: Optional[float] = None,
     cwd: Optional[str] = None,
+    widget_state: bool = True,
 ) -> tuple[dict, List[Mount]]:
     if isinstance(source, dict):
         content = json.dumps(source)
@@ -70,6 +71,7 @@ def build_job(
         "allowErrors": allow_errors,
         "cellTimeout": cell_timeout,
         "cwd": cwd or "/home/xnb",
+        "widgetState": widget_state,
     }
     return job, mount_objs
 
@@ -95,7 +97,7 @@ def run(
     """Execute a notebook (path or nbformat dict) or a script; return the executed notebook.
 
     Keyword options mirror the CLI: env_file, deps, pip, channels, kernel, lock,
-    stdin, mounts, allow_errors, cell_timeout, cwd.
+    stdin, mounts, allow_errors, cell_timeout, cwd, widget_state.
     """
     job, mounts = build_job(source, **job_options)
     kwargs: Dict[str, Any] = {}

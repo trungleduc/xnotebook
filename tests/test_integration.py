@@ -184,3 +184,44 @@ def test_lua_kernel(tmp_path):
     result = xnb.run(f, return_result=True)
     assert texts(result["notebook"]["cells"][0]) == "lua 3\n"
     assert result["notebook"]["metadata"]["kernelspec"]["name"] == "xlua"
+
+
+def test_widget_state_saved():
+    import pathlib
+
+    result = xnb.run(
+        nb(
+            "import ipywidgets as w\ns = w.IntSlider(value=3)\ns",
+            "s.value = 7\ntmp = w.Checkbox()\ndisplay(tmp)\ntmp.close()",
+            "w.Image(value=b'\\x89PNG\\r\\n', format='png')",
+            xnb={"dependencies": ["ipywidgets"]},
+        ),
+        return_result=True,
+    )
+    out = result["notebook"]
+    doc = out["metadata"]["widgets"]["application/vnd.jupyter.widget-state+json"]
+    views = [
+        o["data"]["application/vnd.jupyter.widget-view+json"]["model_id"]
+        for c in out["cells"]
+        for o in c["outputs"]
+        if "application/vnd.jupyter.widget-view+json" in o.get("data", {})
+    ]
+    slider, checkbox, image = views
+    assert doc["state"][slider]["state"]["value"] == 7
+    assert checkbox not in doc["state"]
+    assert doc["state"][image]["buffers"][0]["path"] == ["value"]
+    try:
+        import jsonschema
+    except ImportError:
+        return
+    schema = json.loads((pathlib.Path(__file__).parent / "widget_state.schema.json").read_text())
+    jsonschema.validate(doc, schema)
+
+
+def test_widget_state_disabled():
+    result = xnb.run(
+        nb("import ipywidgets as w\nw.IntSlider()", xnb={"dependencies": ["ipywidgets"]}),
+        widget_state=False,
+        return_result=True,
+    )
+    assert "widgets" not in result["notebook"]["metadata"]

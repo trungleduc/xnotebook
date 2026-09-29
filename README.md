@@ -46,6 +46,14 @@ kernel comes from `--kernel`, then the notebook's `kernelspec`, then the file ex
 Solved environments are cached as locks. `--lock-out lock.json` saves the lock, and
 `--lock lock.json` reuses it without solving.
 
+## Widgets
+
+ipywidgets state is saved in `metadata.widgets`
+(`application/vnd.jupyter.widget-state+json`), like `jupyter nbconvert --execute` does.
+JupyterLab, nbviewer and Voila then render the widgets with the values they had at the
+end of the run. Closed widgets are dropped. Use `--no-widget-state` to turn this off.
+See `demo/widgets_demo.ipynb`.
+
 Scripts are split into cells at `# %%` markers (percent format). The comment prefix
 follows the language, so Lua uses `-- %%`.
 
@@ -77,7 +85,7 @@ xnb FILE [-o OUT|-] [--inplace] [-q]
          [-e ENV.yaml] [-d SPEC]... [--pip SPEC]... [-c CHANNEL]... [--kernel NAME]
          [--lock FILE] [--lock-out FILE]
          [--mount SRC:DST[:ro|rw]]... [--cwd DIR] [--stdin FILE]
-         [--timeout S] [--cell-timeout S] [--max-memory MB] [--allow-errors]
+         [--timeout S] [--cell-timeout S] [--max-memory MB] [--allow-errors] [--no-widget-state] [-v]
          [--offline] [--refresh] [--strict] [--browser-path PATH] [--cache-dir DIR] [--debug]
 xnb setup [--from chrome-headless-shell.zip]
 xnb cache {info,clean,prune}
@@ -117,7 +125,8 @@ $ python tools/pin_chromium.py 154.0.8037.57       # hashes for chromium.PINNED
 
 ## Known limitations
 
-- **Widgets:** comm messages are ignored, and widget state isn't saved.
+- **Widgets:** the final ipywidgets state is saved as a static snapshot. Python callbacks
+  don't run when the saved notebook is opened.
 - **pip:** pure-Python wheels only.
 - **xeus-lua:** each top-level line is evaluated on its own, so `local` variables don't
   persist across lines. Use globals.

@@ -113,6 +113,7 @@ def run_command(
     cell_timeout: Annotated[Optional[float], typer.Option("--cell-timeout", help="Per-cell timeout in seconds.", rich_help_panel=EXEC)] = None,
     max_memory: Annotated[Optional[int], typer.Option("--max-memory", metavar="MB", help="JS heap limit for the browser.", rich_help_panel=EXEC)] = None,
     allow_errors: Annotated[bool, typer.Option("--allow-errors", help="Keep executing after a failing cell.", rich_help_panel=EXEC)] = False,
+    widget_state: Annotated[bool, typer.Option("--widget-state/--no-widget-state", help="Save ipywidgets state in the notebook metadata.", rich_help_panel=OUT)] = True,
     offline: Annotated[bool, typer.Option("--offline", help="Never contact upstream; use the cache only.", rich_help_panel=NET)] = False,
     refresh: Annotated[bool, typer.Option("--refresh", help="Re-solve and revalidate cached metadata.", rich_help_panel=NET)] = False,
     strict: Annotated[bool, typer.Option("--strict", help="Refuse to run Chromium without its OS sandbox.", rich_help_panel=NET)] = False,
@@ -145,6 +146,7 @@ def run_command(
             allow_errors=allow_errors,
             cell_timeout=cell_timeout,
             cwd=cwd,
+            widget_state=widget_state,
         )
     except (OSError, ValueError, MountError) as e:
         _fail(str(e), 2)
