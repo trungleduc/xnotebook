@@ -1,0 +1,19 @@
+{
+  "name": "xnb-web",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@emscripten-forge/mambajs": "0.23.0",
+    "@emscripten-forge/mambajs-core": "0.23.0",
+    "yaml": "^2.7.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0",
+    "typescript": "^5.6.0"
+  }
+}
