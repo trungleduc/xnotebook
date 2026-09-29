@@ -1,0 +1,62 @@
+name: Publish Release
+
+# semantic-release on every push to main. Conventional commit prefixes decide the release:
+#   feat: -> minor, fix: / perf: -> patch, `!` or "BREAKING CHANGE:" -> major
+#   chore:, docs:, ci:, test:, refactor:, style:, build: -> no release
+# On release: version stamped into xnotebook/__init__.py, CHANGELOG.md updated, wheel + sdist
+# built (with the web bundle), tag + GitHub release created, then published to PyPI
+# via trusted publishing.
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+  id-token: write
+
+concurrency:
+  group: publish-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install
+        run: |
+          npm ci
+          npm ci --prefix web
+          python -m pip install build twine -e ".[test]"
+
+      - name: Test
+        run: |
+          npm run --prefix web typecheck
+          npm run --prefix web build
+          npm test --prefix web
+          python -m xnotebook setup
+          python -m pytest tests -q
+
+      - name: Release
+        run: npx --no-install semantic-release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish to PyPI
+        if: hashFiles('dist/*.whl') != ''
+        uses: pypa/gh-action-pypi-publish@release/v1
