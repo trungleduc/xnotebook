@@ -3,6 +3,6 @@ __pycache__/
 dist/
 build/
 web/node_modules/
-xnb/_web/
+xnotebook/_web/
 *.out.ipynb
 .pytest_cache/

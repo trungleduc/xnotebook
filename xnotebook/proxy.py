@@ -34,7 +34,7 @@ from .cache import Cache
 
 CHUNK = 1 << 16
 PACKAGE_SUFFIXES = (".conda", ".tar.bz2", ".whl")
-USER_AGENT = "xnb (+https://github.com/jupyterlite/xnb)"
+USER_AGENT = "xnotebook"
 
 # Security headers for the web bundle. Upstream traffic is https:// (rewritten to
 # the proxy by the firewall); the kernel worker gets its own, stricter policy.

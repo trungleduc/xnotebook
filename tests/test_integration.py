@@ -10,10 +10,10 @@ import textwrap
 
 import pytest
 
-import xnb
-from xnb import chromium
-from xnb.cache import Cache
-from xnb.session import WEB_ROOT
+import xnotebook
+from xnotebook import chromium
+from xnotebook.cache import Cache
+from xnotebook.session import WEB_ROOT
 
 
 def _have_browser() -> bool:
@@ -57,7 +57,7 @@ def texts(cell):
 def test_basic_notebook(tmp_path):
     stdin = tmp_path / "stdin.txt"
     stdin.write_text("World\n")
-    result = xnb.run(
+    result = xnotebook.run(
         nb(
             "print('hello'); 1 + 1",
             "import numpy as np\nint(np.arange(3).sum())",
@@ -121,7 +121,7 @@ def test_escape_attempts_blocked():
             print('blocked')
         print('HOME' in os.environ and os.environ['HOME'] != os.path.expanduser('~root'))
     """
-    result = xnb.run(nb(probe, fs), allow_errors=True, return_result=True)
+    result = xnotebook.run(nb(probe, fs), allow_errors=True, return_result=True)
     cells = result["notebook"]["cells"]
     assert "ESCAPED" not in texts(cells[0]), texts(cells[0])
     assert set(texts(cells[0]).strip().split(",")) == {"blocked"}
@@ -153,7 +153,7 @@ def test_script_pep723_mounts_and_lock(tmp_path):
         )
     )
     lock_out = tmp_path / "lock.json"
-    result = xnb.run(
+    result = xnotebook.run(
         script,
         mounts=[f"{data}:/data", f"{out}:/out:rw"],
         lock_out=lock_out,
@@ -166,13 +166,13 @@ def test_script_pep723_mounts_and_lock(tmp_path):
     lock = json.loads(lock_out.read_text())
     assert any(p.startswith("six-") for p in lock["pipPackages"])
     # Reuse the lock offline: everything comes from the cache
-    again = xnb.run(script, lock=lock_out, offline=True, mounts=[f"{data}:/data", f"{out}:/out:rw"], return_result=True)
+    again = xnotebook.run(script, lock=lock_out, offline=True, mounts=[f"{data}:/data", f"{out}:/out:rw"], return_result=True)
     assert again["status"] == "ok"
     assert again["stats"]["upstream_fetches"] == 0
 
 
 def test_cell_timeout(tmp_path):
-    result = xnb.run(nb("print('a')", "while True: pass", "print('b')"), cell_timeout=3, return_result=True)
+    result = xnotebook.run(nb("print('a')", "while True: pass", "print('b')"), cell_timeout=3, return_result=True)
     assert result["status"] == "timeout" and result["failedCell"] == 1
     assert result["notebook"]["cells"][1]["outputs"][-1]["ename"] == "TimeoutError"
     assert result["notebook"]["cells"][2]["outputs"] == []
@@ -181,7 +181,7 @@ def test_cell_timeout(tmp_path):
 def test_lua_kernel(tmp_path):
     f = tmp_path / "hello.lua"
     f.write_text('print("lua", 1 + 2)\n')
-    result = xnb.run(f, return_result=True)
+    result = xnotebook.run(f, return_result=True)
     assert texts(result["notebook"]["cells"][0]) == "lua 3\n"
     assert result["notebook"]["metadata"]["kernelspec"]["name"] == "xlua"
 
@@ -189,7 +189,7 @@ def test_lua_kernel(tmp_path):
 def test_widget_state_saved():
     import pathlib
 
-    result = xnb.run(
+    result = xnotebook.run(
         nb(
             "import ipywidgets as w\ns = w.IntSlider(value=3)\ns",
             "s.value = 7\ntmp = w.Checkbox()\ndisplay(tmp)\ntmp.close()",
@@ -219,7 +219,7 @@ def test_widget_state_saved():
 
 
 def test_widget_state_disabled():
-    result = xnb.run(
+    result = xnotebook.run(
         nb("import ipywidgets as w\nw.IntSlider()", xnb={"dependencies": ["ipywidgets"]}),
         widget_state=False,
         return_result=True,

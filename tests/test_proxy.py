@@ -8,8 +8,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
-from xnb.cache import Cache
-from xnb.proxy import Proxy
+from xnotebook.cache import Cache
+from xnotebook.proxy import Proxy
 
 PKG = b"conda package bytes " * 5000
 PKG_SHA = hashlib.sha256(PKG).hexdigest()

@@ -1,4 +1,4 @@
-from xnb.cli import main
+from xnotebook.cli import main
 
 
 def test_help(capsys):

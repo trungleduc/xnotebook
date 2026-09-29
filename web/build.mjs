@@ -1,11 +1,11 @@
-// Build the web bundle into ../xnb/_web (shipped inside the Python wheel).
+// Build the web bundle into ../xnotebook/_web (shipped inside the Python wheel).
 import * as esbuild from 'esbuild';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const out = path.resolve(here, '../xnb/_web');
+const out = path.resolve(here, '../xnotebook/_web');
 fs.rmSync(out, { recursive: true, force: true });
 fs.mkdirSync(out, { recursive: true });
 

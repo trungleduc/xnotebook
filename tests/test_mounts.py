@@ -3,7 +3,7 @@ import os
 
 import pytest
 
-from xnb.mounts import MountError, mount_to_job, parse_mount, write_back
+from xnotebook.mounts import MountError, mount_to_job, parse_mount, write_back
 
 
 def b64(s: bytes) -> str:

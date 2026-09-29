@@ -1,4 +1,4 @@
-"""Build the TypeScript web bundle (web/ -> xnb/_web) before packaging."""
+"""Build the TypeScript web bundle (web/ -> xnotebook/_web) before packaging."""
 
 import os
 import shutil
@@ -13,18 +13,18 @@ class WebBundleHook(BuildHookInterface):
 
     def initialize(self, version, build_data):
         root = Path(self.root)
-        out = root / "xnb" / "_web"
+        out = root / "xnotebook" / "_web"
         web = root / "web"
         if os.environ.get("XNB_SKIP_WEB_BUILD") and (out / "index.html").exists():
             return
         if not web.exists():
             if (out / "index.html").exists():
                 return  # building from an sdist that already contains the bundle
-            raise RuntimeError("web/ sources missing and no prebuilt xnb/_web bundle")
+            raise RuntimeError("web/ sources missing and no prebuilt xnotebook/_web bundle")
         npm = shutil.which("npm")
         if npm is None:
             if (out / "index.html").exists():
-                self.app.display_warning("npm not found; using the existing xnb/_web bundle")
+                self.app.display_warning("npm not found; using the existing xnotebook/_web bundle")
                 return
             raise RuntimeError("npm is required to build the web bundle")
         if not (web / "node_modules").exists():

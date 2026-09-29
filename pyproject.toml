@@ -3,7 +3,7 @@ requires = ["hatchling>=1.24"]
 build-backend = "hatchling.build"
 
 [project]
-name = "xnb"
+name = "xnotebook"
 dynamic = ["version"]
 description = "Run notebooks and scripts on sandboxed xeus wasm kernels (emscripten-forge) inside headless Chromium"
 readme = "README.md"
@@ -23,17 +23,18 @@ classifiers = [
 test = ["pytest>=7", "nbformat>=5", "jsonschema>=4"]
 
 [project.scripts]
-xnb = "xnb.cli:main"
+xnb = "xnotebook.cli:main"
+xnotebook = "xnotebook.cli:main"
 
 [tool.hatch.version]
-path = "xnb/__init__.py"
+path = "xnotebook/__init__.py"
 
 [tool.hatch.build.targets.wheel]
-packages = ["xnb"]
-artifacts = ["xnb/_web/**"]
+packages = ["xnotebook"]
+artifacts = ["xnotebook/_web/**"]
 
 [tool.hatch.build.targets.sdist]
-include = ["xnb", "web/src", "web/build.mjs", "web/package.json", "web/package-lock.json", "web/tsconfig.json", "hatch_build.py", "tests", "README.md", "PLAN.md"]
+include = ["xnotebook", "web/src", "web/build.mjs", "web/package.json", "web/package-lock.json", "web/tsconfig.json", "hatch_build.py", "tests", "README.md", "PLAN.md"]
 
 [tool.hatch.build.hooks.custom]
 path = "hatch_build.py"

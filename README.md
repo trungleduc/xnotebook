@@ -1,13 +1,15 @@
-# xnb
+# xnotebook
 
 Run Jupyter notebooks and scripts on **xeus wasm kernels** with **emscripten-forge**
 packages, sandboxed inside headless Chromium.
 
 ```console
-$ pip install xnb
+$ pip install xnotebook
 $ xnb analysis.ipynb                 # writes analysis.out.ipynb
 $ xnb script.py -d numpy             # prints outputs as they come
 ```
+
+The command is `xnb` (`xnotebook` works too), and the Python module is `xnotebook`.
 
 The first run downloads a pinned, sha256-verified `chrome-headless-shell`
 (about 120 MB) into the cache. No conda, Node or system browser is needed.
@@ -97,10 +99,10 @@ errors.
 ## Python API
 
 ```python
-import xnb
+import xnotebook
 
-nb = xnb.run("analysis.ipynb", deps=["numpy"], cell_timeout=60)   # returns the executed nbformat dict
-res = xnb.run(nb_dict, allow_errors=True, return_result=True)     # includes status, failedCell, stats
+nb = xnotebook.run("analysis.ipynb", deps=["numpy"], cell_timeout=60)   # returns the executed nbformat dict
+res = xnotebook.run(nb_dict, allow_errors=True, return_result=True)     # includes status, failedCell, stats
 ```
 
 ## Cache
@@ -117,7 +119,7 @@ The cache lives in `~/.cache/xnb` by default (`$XNB_CACHE_DIR` overrides it):
 ## Development
 
 ```console
-$ cd web && npm ci && npm run build && npm test   # bundle -> xnb/_web
+$ cd web && npm ci && npm run build && npm test   # bundle -> xnotebook/_web
 $ pip install -e ".[test]"
 $ pytest                                         # browser tests are skipped without Chromium
 $ python tools/pin_chromium.py 154.0.8037.57       # hashes for chromium.PINNED
