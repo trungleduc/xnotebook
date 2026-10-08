@@ -1,3 +1,10 @@
+# [1.1.0](https://github.com/trungleduc/xnotebook/compare/v1.0.0...v1.1.0) (2026-10-08)
+
+
+### Features
+
+* add mcp ([47a9184](https://github.com/trungleduc/xnotebook/commit/47a9184124abcb6362d6b25a486df0dc4f1ffe3a))
+
 # 1.0.0 (2026-09-29)
 
 
