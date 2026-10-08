@@ -35,6 +35,8 @@ export interface IJob {
   widgetState?: boolean;
   /** Working directory of the kernel. */
   cwd?: string | null;
+  /** Ask the host for cells one at a time (`next`) instead of running `content`. */
+  interactive?: boolean;
 }
 
 export type Output = Record<string, any>;
@@ -62,4 +64,6 @@ export interface IRunResult {
   failedCell?: number | null;
   error?: string | null;
   mounts?: { dst: string; files: IMountFile[] }[];
+  /** Interactive session: report of the cell that ended it (timeout or dead kernel). */
+  last?: Record<string, any> | null;
 }

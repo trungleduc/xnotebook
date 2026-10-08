@@ -1,4 +1,4 @@
-"""Command line interface (Typer): `xnb <file> [options]`, `xnb setup`, `xnb cache ...`."""
+"""Command line interface (Typer): `xnb <file> [options]`, `xnb setup`, `xnb cache ...`, `xnb mcp`."""
 
 from __future__ import annotations
 
@@ -255,6 +255,52 @@ def cache_command(
         typer.echo(f"removed {t}")
 
 
+@app.command("mcp")
+def mcp_command(
+    mounts: Annotated[Optional[List[str]], typer.Option("--mount", metavar="SRC:DST[:ro]", help="Expose host files to every kernel, read-only (copied in when a kernel starts).")] = None,
+    cwd: Annotated[Optional[str], typer.Option("--cwd", help="Kernel working directory (default /home/xnb).")] = None,
+    channels: Annotated[Optional[List[str]], typer.Option("-c", "--channel", help="Channel (repeatable).")] = None,
+    cell_timeout: Annotated[float, typer.Option("--cell-timeout", help="Per-cell timeout in seconds; a timeout ends the session (0: none).")] = 120,
+    idle_timeout: Annotated[float, typer.Option("--idle-timeout", help="Close sessions idle for this many seconds (0: never).")] = 900,
+    max_sessions: Annotated[int, typer.Option("--max-sessions", help="Kernels running at once (one browser each).")] = 4,
+    max_memory: Annotated[Optional[int], typer.Option("--max-memory", metavar="MB", help="JS heap limit for each browser.")] = None,
+    strict: Annotated[bool, typer.Option("--strict", help="Refuse to run Chromium without its OS sandbox.")] = False,
+    offline: Annotated[bool, typer.Option("--offline", help="Never contact upstream; use the cache only.")] = False,
+    browser_path: Annotated[Optional[str], typer.Option("--browser-path", help="Use this Chromium/chrome-headless-shell binary.")] = None,
+    cache_dir: Annotated[Optional[Path], typer.Option("--cache-dir", help="Cache directory (default ~/.cache/xnb or $XNB_CACHE_DIR).")] = None,
+    debug: Annotated[bool, typer.Option("--debug", help="Verbose logs on stderr.")] = False,
+) -> None:
+    """Serve the sandboxed kernels to MCP clients (Claude Code, Claude Desktop, ...) over stdio."""
+    from .mcp import Config, serve_stdio
+    from .mounts import parse_mount
+
+    for spec in mounts or []:
+        try:
+            m = parse_mount(spec)
+        except MountError as e:
+            _fail(str(e), 2)
+        if m.mode != "ro":
+            _fail(f"--mount {spec}: mounts are read-only in mcp mode", 2)
+    if max_sessions < 1:
+        _fail("--max-sessions must be at least 1", 2)
+    serve_stdio(
+        Config(
+            mounts=mounts or [],
+            cwd=cwd,
+            channels=channels or [],
+            cell_timeout=cell_timeout or None,
+            idle_timeout=idle_timeout or None,
+            max_sessions=max_sessions,
+            max_memory_mb=max_memory,
+            strict=strict,
+            offline=offline,
+            cache_dir=cache_dir,
+            browser_path=browser_path,
+            debug=debug,
+        )
+    )
+
+
 def _version(value: bool) -> None:
     if value:
         typer.echo(f"xnb {__version__}")
@@ -276,7 +322,7 @@ def _fail(message: str, code: int) -> "typer.Exit":
     raise typer.Exit(code)
 
 
-COMMANDS = {"run", "setup", "cache"}
+COMMANDS = {"run", "setup", "cache", "mcp"}
 
 
 def main(argv: Optional[List[str]] = None) -> int:

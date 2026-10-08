@@ -1,4 +1,5 @@
-// Page entry point: job -> merge deps -> solve -> download -> SEAL -> boot kernel -> run cells.
+// Page entry point: job -> merge deps -> solve -> download -> SEAL -> boot kernel -> run cells
+// (all cells of the job, or one at a time from the host in an interactive session).
 
 import { ILock } from '@emscripten-forge/mambajs-core';
 import { computeLockId } from '@emscripten-forge/mambajs-core';
@@ -6,9 +7,9 @@ import { debug, emit, progress, request, send, step } from './host';
 import { mergeEnv } from './deps';
 import { channelUrls, downloadAll, formatBytes, lockChannelUrls, lockFiles, solveEnv } from './solve';
 import { KernelClient, makeMessage, normalizeEname, OutputTracker } from './executor';
-import { parseNotebook, scriptToNotebook, sourceText } from './formats';
+import { ensureCellIds, parseNotebook, scriptToNotebook, sourceText } from './formats';
 import { WidgetStateTracker } from './widgets';
-import { IJob, INotebook, IRunResult, Output } from './types';
+import { ICell, IJob, INotebook, IRunResult, Output } from './types';
 
 async function fetchBytes(url: string): Promise<ArrayBuffer> {
   const resp = await fetch(url);
@@ -110,8 +111,119 @@ async function main(): Promise<void> {
   progress(`kernel ready: ${spec.display_name} (${((performance.now() - tBoot) / 1000).toFixed(1)}s)`);
   emit({ kind: 'kernel_ready', spec });
 
-  const result = await execute(job, nb, kernel, spec, lock);
+  const result = job.interactive
+    ? await interactive(job, nb, kernel, spec)
+    : await execute(job, nb, kernel, spec, lock);
   send({ type: 'done', result });
+}
+
+interface IExecContext {
+  kernel: KernelClient;
+  tracker: OutputTracker;
+  /** Per-cell timeout in seconds. */
+  cellTimeout: number | null;
+  stopOnError: boolean;
+}
+
+interface ICellRun {
+  status: 'ok' | 'error' | 'timeout' | 'dead';
+  error: string | null;
+}
+
+/** Fill in language_info and kernelspec from the running kernel. */
+async function describeKernel(nb: INotebook, kernel: KernelClient, spec: any): Promise<void> {
+  const info = await kernel.request(makeMessage('kernel_info_request', {}), () => {}, 60_000);
+  if (info.reply) {
+    nb.metadata.language_info = info.reply.content.language_info ?? nb.metadata.language_info;
+  }
+  nb.metadata.kernelspec = {
+    name: spec.name,
+    display_name: spec.display_name,
+    language: spec.language ?? info.reply?.content?.language_info?.name
+  };
+  nb.metadata.xnb = nb.metadata.xnb ?? undefined;
+  if (nb.metadata.xnb === undefined) {
+    delete nb.metadata.xnb;
+  }
+}
+
+/** Execute one code cell, filling its outputs and execution_count in place. */
+async function runCell(ctx: IExecContext, index: number, cell: ICell): Promise<ICellRun> {
+  const { kernel, tracker, cellTimeout } = ctx;
+  cell.outputs = [];
+  cell.execution_count = null;
+  const code = sourceText(cell.source);
+  emit({ kind: 'cell_start', cell: index, source: code });
+  const tCell = performance.now();
+  const outputs: Output[] = cell.outputs;
+  const state = { clearPending: false };
+  const msg = makeMessage('execute_request', {
+    code,
+    silent: false,
+    store_history: true,
+    user_expressions: {},
+    allow_stdin: true,
+    stop_on_error: ctx.stopOnError
+  });
+  const res = await kernel.request(
+    msg,
+    m => {
+      if (m.header.msg_type === 'execute_input') {
+        cell.execution_count = m.content.execution_count ?? cell.execution_count;
+        return;
+      }
+      tracker.apply(index, outputs, m, state);
+    },
+    cellTimeout ? cellTimeout * 1000 : null
+  );
+  if (res.status === 'ok') {
+    await kernel.sync(); // top-level await: let the pending promise settle
+  }
+  if (res.reply) {
+    cell.execution_count = res.reply.content.execution_count ?? cell.execution_count;
+  }
+  emit({
+    kind: 'cell_end',
+    cell: index,
+    status: res.reply?.content?.status ?? res.status,
+    seconds: (performance.now() - tCell) / 1000,
+    outputs: outputs.length
+  });
+  if (res.status === 'timeout') {
+    kernel.terminate(`cell ${index} timed out`);
+    outputs.push({
+      output_type: 'error',
+      ename: 'TimeoutError',
+      evalue: `cell execution timed out after ${cellTimeout}s`,
+      traceback: [`TimeoutError: cell execution timed out after ${cellTimeout}s`]
+    });
+    return { status: 'timeout', error: `cell ${index} timed out after ${cellTimeout}s` };
+  }
+  if (res.status === 'dead') {
+    outputs.push({ output_type: 'error', ename: 'KernelDied', evalue: String(res.reason), traceback: [] });
+    return { status: 'dead', error: `kernel died: ${res.reason}` };
+  }
+  if (res.reply?.content?.status === 'error') {
+    return { status: 'error', error: `${normalizeEname(res.reply.content.ename)}: ${res.reply.content.evalue}` };
+  }
+  return { status: 'ok', error: null };
+}
+
+/** Copy rw mounts back out of the kernel filesystem. */
+async function collectMounts(job: IJob, kernel: KernelClient): Promise<IRunResult['mounts']> {
+  if (kernel.dead || !(job.mounts ?? []).some(m => m.mode === 'rw')) {
+    return [];
+  }
+  return new Promise(resolve => {
+    const onMsg = (ev: MessageEvent) => {
+      if (ev.data?.xnb === 'collected') {
+        kernel.worker.removeEventListener('message', onMsg);
+        resolve(ev.data.mounts);
+      }
+    };
+    kernel.worker.addEventListener('message', onMsg);
+    kernel.worker.postMessage({ xnb: 'collect' });
+  });
 }
 
 async function execute(
@@ -126,110 +238,36 @@ async function execute(
   if (job.widgetState !== false) {
     kernel.onAnyMessage = m => widgets.handle(m);
   }
-
-  // kernel_info for language_info
-  const info = await kernel.request(makeMessage('kernel_info_request', {}), () => {}, 60_000);
-  if (info.reply) {
-    nb.metadata.language_info = info.reply.content.language_info ?? nb.metadata.language_info;
-  }
-  nb.metadata.kernelspec = {
-    name: spec.name,
-    display_name: spec.display_name,
-    language: spec.language ?? info.reply?.content?.language_info?.name
-  };
-  nb.metadata.xnb = nb.metadata.xnb ?? undefined;
-  if (nb.metadata.xnb === undefined) {
-    delete nb.metadata.xnb;
-  }
+  await describeKernel(nb, kernel, spec);
 
   let status: IRunResult['status'] = 'ok';
   let failedCell: number | null = null;
   let error: string | null = null;
-  const cellTimeout = job.cellTimeout ? job.cellTimeout * 1000 : null;
+  const ctx: IExecContext = { kernel, tracker, cellTimeout: job.cellTimeout ?? null, stopOnError: !job.allowErrors };
 
   for (let i = 0; i < nb.cells.length; i++) {
     const cell = nb.cells[i];
     if (cell.cell_type !== 'code') {
       continue;
     }
-    cell.outputs = [];
-    cell.execution_count = null;
     if (status !== 'ok') {
-      continue; // cells after a failure are left unexecuted
+      cell.outputs = []; // cells after a failure are left unexecuted
+      cell.execution_count = null;
+      continue;
     }
-    const code = sourceText(cell.source);
-    emit({ kind: 'cell_start', cell: i, source: code });
-    const tCell = performance.now();
-    const outputs: Output[] = cell.outputs;
-    const state = { clearPending: false };
-    const msg = makeMessage('execute_request', {
-      code,
-      silent: false,
-      store_history: true,
-      user_expressions: {},
-      allow_stdin: true,
-      stop_on_error: !job.allowErrors
-    });
-    const res = await kernel.request(
-      msg,
-      m => {
-        if (m.header.msg_type === 'execute_input') {
-          cell.execution_count = m.content.execution_count ?? cell.execution_count;
-          return;
-        }
-        tracker.apply(i, outputs, m, state);
-      },
-      cellTimeout
-    );
-    if (res.status === 'ok') {
-      await kernel.sync(); // top-level await: let the pending promise settle
-    }
-    if (res.reply) {
-      cell.execution_count = res.reply.content.execution_count ?? cell.execution_count;
-    }
-    emit({
-      kind: 'cell_end',
-      cell: i,
-      status: res.reply?.content?.status ?? res.status,
-      seconds: (performance.now() - tCell) / 1000,
-      outputs: outputs.length
-    });
-    if (res.status === 'timeout') {
-      kernel.terminate(`cell ${i} timed out`);
-      outputs.push({
-        output_type: 'error',
-        ename: 'TimeoutError',
-        evalue: `cell execution timed out after ${job.cellTimeout}s`,
-        traceback: [`TimeoutError: cell execution timed out after ${job.cellTimeout}s`]
-      });
+    const run = await runCell(ctx, i, cell);
+    if (run.status === 'timeout') {
       status = 'timeout';
-      failedCell = i;
-      error = `cell ${i} timed out after ${job.cellTimeout}s`;
-    } else if (res.status === 'dead') {
+    } else if (run.status === 'dead' || (run.status === 'error' && !job.allowErrors)) {
       status = 'error';
+    }
+    if (status !== 'ok') {
       failedCell = i;
-      error = `kernel died: ${res.reason}`;
-      outputs.push({ output_type: 'error', ename: 'KernelDied', evalue: String(res.reason), traceback: [] });
-    } else if (res.reply?.content?.status === 'error' && !job.allowErrors) {
-      status = 'error';
-      failedCell = i;
-      error = `${normalizeEname(res.reply.content.ename)}: ${res.reply.content.evalue}`;
+      error = run.error;
     }
   }
 
-  let mounts: IRunResult['mounts'] = [];
-  if (!kernel.dead && (job.mounts ?? []).some(m => m.mode === 'rw')) {
-    mounts = await new Promise(resolve => {
-      const onMsg = (ev: MessageEvent) => {
-        if (ev.data?.xnb === 'collected') {
-          kernel.worker.removeEventListener('message', onMsg);
-          resolve(ev.data.mounts);
-        }
-      };
-      kernel.worker.addEventListener('message', onMsg);
-      kernel.worker.postMessage({ xnb: 'collect' });
-    });
-  }
+  const mounts = await collectMounts(job, kernel);
   void lock;
   if (job.widgetState !== false) {
     widgets.saveTo(nb);
@@ -238,6 +276,58 @@ async function execute(
     }
   }
   return { notebook: nb, status, failedCell, error, mounts };
+}
+
+/** What the host gets back for each cell of an interactive session. */
+interface ICellReport {
+  cell: number;
+  status: ICellRun['status'];
+  error: string | null;
+  executionCount: number | null;
+  outputs: Output[];
+}
+
+/**
+ * Interactive session: ask the host for one cell at a time (`next`) until it says close
+ * or the kernel dies. Every `next` request carries the report of the previous cell.
+ */
+async function interactive(job: IJob, nb: INotebook, kernel: KernelClient, spec: any): Promise<IRunResult> {
+  // Outputs travel back with the cell report; no need to stream them as events too.
+  const tracker = new OutputTracker(() => {});
+  await describeKernel(nb, kernel, spec);
+  nb.cells = [];
+  const ctx: IExecContext = { kernel, tracker, cellTimeout: job.cellTimeout ?? null, stopOnError: false };
+
+  let last: ICellReport | null = null;
+  let status: IRunResult['status'] = 'ok';
+  let failedCell: number | null = null;
+  let error: string | null = null;
+  for (;;) {
+    const next = await request<{ code?: string; close?: boolean }>('next', { result: last });
+    if (next.close) {
+      last = null;
+      break;
+    }
+    const cell: ICell = { cell_type: 'code', source: next.code ?? '', metadata: {}, outputs: [], execution_count: null };
+    const index = nb.cells.push(cell) - 1;
+    const run = await runCell(ctx, index, cell);
+    last = {
+      cell: index,
+      status: run.status,
+      error: run.error,
+      executionCount: cell.execution_count ?? null,
+      outputs: cell.outputs ?? []
+    };
+    if (run.status === 'timeout' || run.status === 'dead') {
+      status = run.status === 'timeout' ? 'timeout' : 'error';
+      failedCell = index;
+      error = run.error;
+      break; // the kernel is gone; `last` goes back with `done`
+    }
+  }
+  ensureCellIds(nb);
+  const mounts = await collectMounts(job, kernel);
+  return { notebook: nb, status, failedCell, error, mounts, last };
 }
 
 main().catch(e => {

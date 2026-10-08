@@ -21,8 +21,9 @@ class CellError(RuntimeError):
 
 
 def build_job(
-    source: Union[str, Path, dict],
+    source: Union[str, Path, dict, None] = None,
     *,
+    content: Optional[str] = None,
     filename: Optional[str] = None,
     env_file: Optional[Union[str, Path]] = None,
     deps: Iterable[str] = (),
@@ -37,9 +38,13 @@ def build_job(
     cwd: Optional[str] = None,
     widget_state: bool = True,
 ) -> tuple[dict, List[Mount]]:
-    if isinstance(source, dict):
+    if content is not None:
+        path = filename or "script.py"
+    elif isinstance(source, dict):
         content = json.dumps(source)
         path = filename or "notebook.ipynb"
+    elif source is None:
+        raise ValueError("build_job needs a source or content")
     else:
         p = Path(source)
         content = p.read_text(encoding="utf-8")

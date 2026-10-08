@@ -91,6 +91,8 @@ xnb FILE [-o OUT|-] [--inplace] [-q]
          [--offline] [--refresh] [--strict] [--browser-path PATH] [--cache-dir DIR] [--debug]
 xnb setup [--from chrome-headless-shell.zip]
 xnb cache {info,clean,prune}
+xnb mcp [--mount SRC:DST[:ro]]... [--cwd DIR] [-c CHANNEL]... [--cell-timeout S] [--idle-timeout S]
+        [--max-sessions N] [--max-memory MB] [--strict] [--offline] [--browser-path PATH] [--cache-dir DIR] [--debug]
 ```
 
 Exit codes: 0 on success, 1 when a cell fails or times out, 2 for usage or setup
@@ -104,6 +106,38 @@ import xnotebook
 nb = xnotebook.run("analysis.ipynb", deps=["numpy"], cell_timeout=60)   # returns the executed nbformat dict
 res = xnotebook.run(nb_dict, allow_errors=True, return_result=True)     # includes status, failedCell, stats
 ```
+
+## MCP server
+
+`xnb mcp` serves the same sandbox to MCP clients (Claude Code, Claude Desktop, ...) as a
+code interpreter. It speaks stdio only and never opens a port.
+
+```console
+$ claude mcp add xnb -- xnb mcp --mount ./data:/data
+```
+
+```json
+{"mcpServers": {"xnb": {"command": "xnb", "args": ["mcp", "--mount", "/path/to/data:/data"]}}}
+```
+
+Tools:
+
+- `run(code, kernel?, deps?, pip?)`: runs code once in a fresh kernel.
+- `session_start(kernel?, deps?, pip?)` → `session_id`, then `session_exec(session_id, code)`:
+  a kernel that keeps its state between calls, like a notebook. `session_close` stops it.
+
+Outputs come back as text, with plots as images. Errors set `isError`.
+
+- **Packages:** they are fixed when a session starts, because the session is sealed after
+  that. Start a new session to add packages.
+- **Timeouts:** a cell that times out (`--cell-timeout`, 120 s by default) ends its session.
+  Sessions idle for `--idle-timeout` are closed.
+- **Resources:** each session is one Chromium process, and `--max-sessions` caps how many
+  run at once (4 by default).
+- **Mounts:** only the person starting the server chooses them, and they are read-only.
+
+The first `session_start` on a cold cache downloads the browser and the packages. Running
+`xnb setup` and one `xnb` run beforehand keeps tool calls fast.
 
 ## Cache
 

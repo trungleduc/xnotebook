@@ -1,4 +1,7 @@
-"""Drive one run: boot Chromium -> hand the job to the page -> relay events -> result."""
+"""Drive one run: boot Chromium -> hand the job to the page -> relay events -> result.
+
+`InteractiveSession` keeps the kernel up and feeds it one cell at a time.
+"""
 
 from __future__ import annotations
 
@@ -8,8 +11,11 @@ import queue
 import sys
 import threading
 import time
+from collections import deque
+from concurrent.futures import Future
+from concurrent.futures import TimeoutError as FutureTimeout
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Deque, Dict, Optional, Tuple
 
 from . import chromium
 from .cache import Cache
@@ -74,6 +80,7 @@ class Session:
         self._targets_lock = threading.Lock()
         self.proxy: Optional[Proxy] = None
         self.firewall: Optional[Firewall] = None
+        self.browser: Any = None
         self.stats: Dict[str, Any] = {}
 
     def _dbg(self, msg: str) -> None:
@@ -93,6 +100,14 @@ class Session:
 
     # -- main entry -------------------------------------------------------
     def run(self) -> dict:
+        try:
+            conn, sid = self._start()
+            return self._loop(conn, sid)
+        finally:
+            self._teardown()
+
+    def _start(self) -> Tuple[Any, str]:
+        """Proxy, browser, firewall, page: everything up to the page taking over."""
         if not (WEB_ROOT / "index.html").exists():
             raise RunError(f"web bundle missing at {WEB_ROOT}; build it with `npm run build` in web/")
         self._t0 = time.time()
@@ -104,55 +119,57 @@ class Session:
         proxy.start()
         self.proxy = proxy
         self.progress(f"package proxy on {proxy.origin} (cache {self.cache.root})", verbose=True)
-        browser = None
-        try:
-            browser = chromium.launch(exe, strict=self.strict, max_memory_mb=self.max_memory_mb, log=self.log)
-            conn = browser.conn
-            self.progress(
-                "browser started" + ("" if browser.sandboxed else " without OS sandbox"), verbose=True
-            )
-            fw = Firewall(conn, proxy, log=self._dbg)
-            self.firewall = fw
-            fw.on_attach(self._on_attach)
-            conn.on_event(self._on_event)
-            fw.install()
-            target = conn.call("Target.createTarget", {"url": "about:blank"})
-            self._page_target = target["targetId"]
-            deadline = time.time() + 30
-            while self.page_session is None:
-                with self._targets_lock:
-                    self.page_session = self._targets.get(self._page_target)
-                if self.page_session is None:
-                    if time.time() > deadline:
-                        raise RunError("failed to attach to the page target")
-                    self._attached.wait(0.05)
-                    self._attached.clear()
-            sid = self.page_session
-            conn.call("Runtime.enable", session_id=sid)
-            conn.call("Runtime.addBinding", {"name": "__xnbSend"}, session_id=sid)
-            conn.call("Inspector.enable", session_id=sid)
-            self.progress("firewall installed; loading the runner page", verbose=True)
-            nav = conn.call("Page.navigate", {"url": proxy.base + "index.html"}, session_id=sid)
-            if nav.get("errorText"):
-                raise RunError(f"failed to load the xnb page: {nav['errorText']}")
-            return self._loop(conn, sid)
-        finally:
-            if self.firewall is not None:
-                self.stats["requests_after_seal"] = self.firewall.requests_after_seal
-                self.stats["blocked"] = list(self.firewall.blocked)
-            self.stats["upstream_fetches"] = proxy.stats.upstream_fetches
-            self.stats["package_hits"] = proxy.stats.package_hits
-            self.stats["package_misses"] = proxy.stats.package_misses
-            self.stats["proxy_blocked_after_seal"] = proxy.stats.blocked_after_seal
-            st = self.stats
-            self.progress(
-                f"network: {st['upstream_fetches']} upstream fetches, {st['package_hits']} cached / "
-                f"{st['package_misses']} downloaded packages, {st.get('requests_after_seal', 0)} requests after seal",
-                verbose=True,
-            )
-            if browser is not None:
-                browser.close()
-            proxy.stop()
+        self.browser = chromium.launch(exe, strict=self.strict, max_memory_mb=self.max_memory_mb, log=self.log)
+        conn = self.browser.conn
+        self.progress(
+            "browser started" + ("" if self.browser.sandboxed else " without OS sandbox"), verbose=True
+        )
+        fw = Firewall(conn, proxy, log=self._dbg)
+        self.firewall = fw
+        fw.on_attach(self._on_attach)
+        conn.on_event(self._on_event)
+        fw.install()
+        target = conn.call("Target.createTarget", {"url": "about:blank"})
+        self._page_target = target["targetId"]
+        deadline = time.time() + 30
+        while self.page_session is None:
+            with self._targets_lock:
+                self.page_session = self._targets.get(self._page_target)
+            if self.page_session is None:
+                if time.time() > deadline:
+                    raise RunError("failed to attach to the page target")
+                self._attached.wait(0.05)
+                self._attached.clear()
+        sid = self.page_session
+        conn.call("Runtime.enable", session_id=sid)
+        conn.call("Runtime.addBinding", {"name": "__xnbSend"}, session_id=sid)
+        conn.call("Inspector.enable", session_id=sid)
+        self.progress("firewall installed; loading the runner page", verbose=True)
+        nav = conn.call("Page.navigate", {"url": proxy.base + "index.html"}, session_id=sid)
+        if nav.get("errorText"):
+            raise RunError(f"failed to load the xnb page: {nav['errorText']}")
+        return conn, sid
+
+    def _teardown(self) -> None:
+        proxy = self.proxy
+        if proxy is None:
+            return
+        if self.firewall is not None:
+            self.stats["requests_after_seal"] = self.firewall.requests_after_seal
+            self.stats["blocked"] = list(self.firewall.blocked)
+        self.stats["upstream_fetches"] = proxy.stats.upstream_fetches
+        self.stats["package_hits"] = proxy.stats.package_hits
+        self.stats["package_misses"] = proxy.stats.package_misses
+        self.stats["proxy_blocked_after_seal"] = proxy.stats.blocked_after_seal
+        st = self.stats
+        self.progress(
+            f"network: {st['upstream_fetches']} upstream fetches, {st['package_hits']} cached / "
+            f"{st['package_misses']} downloaded packages, {st.get('requests_after_seal', 0)} requests after seal",
+            verbose=True,
+        )
+        if self.browser is not None:
+            self.browser.close()
+        proxy.stop()
 
     # -- CDP events (reader thread: never block here) ----------------------
     def _on_attach(self, sid: str, info: dict) -> None:
@@ -200,6 +217,9 @@ class Session:
             if kind == "console":
                 self._console(data)
                 continue
+            if kind in ("exec", "close"):
+                self._command(conn, sid, kind, data)
+                continue
             msg = json.loads(data)
             mtype = msg.get("type")
             if mtype == "log":
@@ -220,6 +240,8 @@ class Session:
                 self._reply(conn, sid, msg["id"], True)
             elif mtype == "event":
                 self.on_event(msg.get("event", {}))
+            elif mtype == "next":
+                self._next(conn, sid, msg)
             elif mtype == "done":
                 return msg["result"]
             elif mtype == "error":
@@ -227,6 +249,13 @@ class Session:
                 if self.offline and "504" in message:
                     message += "\n(--offline: this environment is not fully cached yet; run once without --offline)"
                 raise RunError(message)
+
+    # -- interactive hooks (see InteractiveSession) -------------------------
+    def _next(self, conn, sid: str, msg: dict) -> None:
+        raise RunError("the page asked for a cell, but this is not an interactive session")
+
+    def _command(self, conn, sid: str, kind: str, data: Any) -> None:
+        pass
 
     def _console(self, params: dict) -> None:
         if not self.debug:
@@ -269,3 +298,130 @@ class Session:
         for f in msg.get("files", []):
             if f.get("sha256"):
                 self.proxy.expect(f["url"], f["sha256"], f.get("size"))
+
+
+class InteractiveSession(Session):
+    """A kernel that stays up and runs cells one at a time.
+
+    The page asks for each cell with a `next` request (carrying the report of the
+    previous cell); the session loop runs on a background thread and answers it with
+    code from `execute()`, or with `close`.
+    """
+
+    def __init__(self, job: Dict[str, Any], **kwargs: Any) -> None:
+        job = {**job, "interactive": True, "allowErrors": True, "widgetState": False}
+        if job.get("stdin") is None:
+            job["stdin"] = []  # input() fails instead of waiting for an answer
+        super().__init__(job, **kwargs)
+        self._ready = threading.Event()
+        self._finished = threading.Event()
+        self._exec_lock = threading.Lock()
+        self._next_id: Any = None  # the page is waiting for code under this request id
+        self._queued: Deque[Tuple[str, Future]] = deque()
+        self._current: Optional[Future] = None
+        self._closing = False
+        self._thread: Optional[threading.Thread] = None
+        self.result: Optional[dict] = None
+        self.dead: Optional[str] = None
+        self.spec: Optional[dict] = None  # kernelspec of the running kernel
+        on_event = self.on_event
+
+        def record(event: dict) -> None:
+            if event.get("kind") == "kernel_ready":
+                self.spec = event.get("spec")
+            on_event(event)
+
+        self.on_event = record
+
+    def start(self, timeout: Optional[float] = None) -> "InteractiveSession":
+        """Boot browser and kernel; return once the kernel is ready for the first cell."""
+        self._thread = threading.Thread(target=self._main, name="xnb-session", daemon=True)
+        self._thread.start()
+        deadline = None if timeout is None else time.time() + timeout
+        while not self._ready.is_set() and not self._finished.is_set():
+            if deadline is not None and time.time() > deadline:
+                self.kill(f"session did not start within {timeout}s")
+                break
+            self._ready.wait(0.1)
+        if not self._ready.is_set():
+            self._finished.wait(10)
+            raise RunError(self.dead or "session failed to start")
+        return self
+
+    def execute(self, code: str, timeout: Optional[float] = None) -> dict:
+        """Run one cell; return its report: cell, status, error, executionCount, outputs."""
+        with self._exec_lock:
+            if self.dead is not None:
+                raise RunError(f"session ended: {self.dead}")
+            fut: Future = Future()
+            self._inbox.put(("exec", (code, fut)))
+            try:
+                return fut.result(timeout)
+            except FutureTimeout:
+                self.kill(f"no reply within {timeout}s")
+                raise RunError(f"session ended: no reply within {timeout}s") from None
+
+    def close(self, timeout: float = 30) -> Optional[dict]:
+        """Stop the kernel and the browser; return the run result (the session as a notebook)."""
+        if self._thread is not None and self._thread.is_alive():
+            self._inbox.put(("close", None))
+            self._thread.join(timeout)
+            if self._thread.is_alive():
+                self.kill("close timed out")
+                self._thread.join(10)
+        return self.result
+
+    def kill(self, reason: str) -> None:
+        """End the session now; the loop raises and tears the browser down."""
+        self._inbox.put(("crash", reason))
+
+    @property
+    def alive(self) -> bool:
+        return self._ready.is_set() and self.dead is None and not self._finished.is_set()
+
+    # -- session thread -----------------------------------------------------
+    def _main(self) -> None:
+        try:
+            self.result = self.run()
+            self.dead = self.result.get("error") or "session closed"
+            last = self.result.get("last")
+            if self._current is not None and last is not None:
+                self._current.set_result(last)
+                self._current = None
+        except BaseException as e:  # noqa: B036 - reported to every waiter
+            self.dead = str(e) or type(e).__name__
+        finally:
+            for fut in [self._current, *(f for _, f in self._queued)]:
+                if fut is not None and not fut.done():
+                    fut.set_exception(RunError(f"session ended: {self.dead}"))
+            self._current = None
+            self._queued.clear()
+            self._finished.set()
+
+    def _next(self, conn, sid: str, msg: dict) -> None:
+        if self._current is not None:
+            self._current.set_result(msg.get("result"))
+            self._current = None
+        self._next_id = msg["id"]
+        self._ready.set()
+        self._dispatch(conn, sid)
+
+    def _command(self, conn, sid: str, kind: str, data: Any) -> None:
+        if kind == "close":
+            self._closing = True
+        else:
+            self._queued.append(data)
+        self._dispatch(conn, sid)
+
+    def _dispatch(self, conn, sid: str) -> None:
+        if self._next_id is None:
+            return
+        if self._closing:
+            self._reply(conn, sid, self._next_id, {"close": True})
+        elif self._queued:
+            code, fut = self._queued.popleft()
+            self._current = fut
+            self._reply(conn, sid, self._next_id, {"code": code})
+        else:
+            return
+        self._next_id = None

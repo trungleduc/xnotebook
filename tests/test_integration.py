@@ -225,3 +225,60 @@ def test_widget_state_disabled():
         return_result=True,
     )
     assert "widgets" not in result["notebook"]["metadata"]
+
+
+def test_interactive_session():
+    from xnotebook.api import build_job
+    from xnotebook.session import InteractiveSession, RunError
+
+    job, _ = build_job(content="", filename="session.py", kernel="xpython", cell_timeout=5)
+    session = InteractiveSession(job, quiet=True).start(timeout=300)
+    try:
+        assert session.spec["language"] == "python"
+        assert session.execute("x = 41\nprint('hi')")["outputs"] == [
+            {"output_type": "stream", "name": "stdout", "text": "hi\n"}
+        ]
+        report = session.execute("x + 1")
+        assert report["status"] == "ok"
+        assert report["outputs"][0]["data"]["text/plain"] == "42"
+        failed = session.execute("1/0")
+        assert failed["status"] == "error"
+        assert failed["error"].startswith("ZeroDivisionError")
+        assert session.execute("x")["outputs"][0]["data"]["text/plain"] == "41"  # still alive
+        blocked = session.execute("import urllib.request\nurllib.request.urlopen('https://example.com')")
+        assert blocked["status"] == "error"
+        timed_out = session.execute("while True: pass")
+        assert timed_out["status"] == "timeout"
+        assert not session.alive
+        with pytest.raises(RunError, match="session ended"):
+            session.execute("1")
+    finally:
+        result = session.close()
+    assert len(result["notebook"]["cells"]) == 6
+    assert result["status"] == "timeout"
+
+
+def test_mcp_server_tools():
+    from xnotebook.mcp import Config, Server
+
+    server = Server(Config(cell_timeout=30, idle_timeout=None))
+    try:
+        def call(name, **args):
+            return server.handle(
+                {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": name, "arguments": args}}
+            )["result"]
+
+        started = call("session_start", deps=["matplotlib"])
+        assert not started["isError"], started
+        sid = started["content"][0]["text"].split()[1]
+        call("session_exec", session_id=sid, code="import matplotlib.pyplot as plt\nxs = list(range(5))")
+        plot = call("session_exec", session_id=sid, code="plt.plot(xs, xs); plt.show()")
+        assert [c["type"] for c in plot["content"]] == ["image"]
+        assert plot["content"][0]["mimeType"] == "image/png"
+        assert call("session_exec", session_id=sid, code="sum(xs)")["content"] == [{"type": "text", "text": "10\n"}]
+        assert call("session_close", session_id=sid)["content"][0]["text"] == f"closed {sid}"
+        once = call("run", code="print(6 * 7)")
+        assert once["content"] == [{"type": "text", "text": "42\n"}]
+        assert server.sessions == {}
+    finally:
+        server.shutdown()
