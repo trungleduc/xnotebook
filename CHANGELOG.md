@@ -1,3 +1,10 @@
+# [1.3.0](https://github.com/trungleduc/xnotebook/compare/v1.2.0...v1.3.0) (2026-10-10)
+
+
+### Features
+
+* kernel ([2492083](https://github.com/trungleduc/xnotebook/commit/249208336bc3ade14277f927b08d692a8fd2e21b))
+
 # [1.2.0](https://github.com/trungleduc/xnotebook/compare/v1.1.0...v1.2.0) (2026-10-10)
 
 
