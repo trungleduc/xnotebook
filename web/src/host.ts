@@ -7,6 +7,8 @@ declare global {
   interface Window {
     __xnbSend?: (payload: string) => void;
     __xnbReply?: (msg: { id: number; value: any; error: string | null }) => void;
+    /** Bridge mode: the host delivers a Jupyter message for the kernel. */
+    __xnbKernel?: (msg: any) => void;
   }
 }
 

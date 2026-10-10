@@ -93,6 +93,9 @@ xnb setup [--from chrome-headless-shell.zip]
 xnb cache {info,clean,prune}
 xnb mcp [--mount SRC:DST[:ro|rw]]... [--cwd DIR] [-c CHANNEL]... [--cell-timeout S] [--idle-timeout S]
         [--max-sessions N] [--max-memory MB] [--strict] [--offline] [--browser-path PATH] [--cache-dir DIR] [--debug]
+xnb kernel install --name NAME [--display-name TEXT] [-e ENV.yaml] [-d SPEC]... [--pip SPEC]... [-c CHANNEL]...
+        [--kernel NAME] [--mount SRC:DST[:ro|rw]]... [--cwd DIR] [--cell-timeout S] [--max-memory MB] [--strict]
+        [--user | --sys-prefix | --prefix DIR]
 ```
 
 Exit codes: 0 on success, 1 when a cell fails or times out, 2 for usage or setup
@@ -145,6 +148,31 @@ Outputs come back as text, with plots as images. Errors set `isError`.
 
 The first `session_start` on a cold cache downloads the browser and the packages. Running
 `xnb setup` and one `xnb` run beforehand keeps tool calls fast.
+
+## Jupyter kernel
+
+`xnb kernel install` adds a kernelspec, so JupyterLab, Notebook, VS Code, nbclient or
+papermill can run code in the sandbox. It needs the `kernel` extra (pyzmq):
+
+```console
+$ pip install 'xnotebook[kernel]'
+$ xnb kernel install --name foo -e environment.yaml --mount ./data:/data
+$ jupyter lab                                  # pick "foo (xnb)"
+```
+
+- **Packages:** they are fixed per kernelspec, because the kernel is sealed once it
+  starts. Install one kernelspec per environment. The environment file is copied into
+  the kernelspec, and installing again under the same name replaces it. A kernelspec that
+  xnb did not write is never overwritten.
+- **Protocol:** Jupyter messages are relayed unchanged to the xeus kernel, so outputs,
+  completion, inspection, live widgets and `input()` work as with any kernel.
+- **Interrupt:** a wasm kernel cannot be interrupted. An interrupt, a cell that runs past
+  `--cell-timeout`, or a crash restarts the kernel instead: the running cell fails with
+  `KeyboardInterrupt` (or `TimeoutError`), and the kernel comes back with a fresh state.
+- **Mounts:** `:rw` mounts are written back to the host after every cell.
+
+The kernel logs to Jupyter's server log. The first start on a cold cache downloads the
+browser and the packages, so run `xnb setup` and one `xnb` run beforehand.
 
 ## Cache
 

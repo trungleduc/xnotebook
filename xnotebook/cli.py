@@ -1,4 +1,4 @@
-"""Command line interface (Typer): `xnb <file> [options]`, `xnb setup`, `xnb cache ...`, `xnb mcp`."""
+"""Command line interface (Typer): `xnb <file> [options]`, `xnb setup`, `xnb cache ...`, `xnb mcp`, `xnb kernel ...`."""
 
 from __future__ import annotations
 
@@ -299,6 +299,78 @@ def mcp_command(
     )
 
 
+kernel_app = typer.Typer(help="Jupyter kernelspecs backed by sandboxed xnb kernels.", no_args_is_help=True)
+app.add_typer(kernel_app, name="kernel")
+
+
+@kernel_app.command("install")
+def kernel_install_command(
+    name: Annotated[str, typer.Option("--name", help="Kernelspec name (letters, digits, '.', '_', '-').")],
+    display_name: Annotated[Optional[str], typer.Option("--display-name", help="Name shown in Jupyter (default: '<name> (xnb)').")] = None,
+    env_file: Annotated[Optional[Path], typer.Option("-e", "--env", help="environment.yaml (copied into the kernelspec).", rich_help_panel=DEPS)] = None,
+    deps: Annotated[Optional[List[str]], typer.Option("-d", "--dep", help="Conda spec (repeatable).", rich_help_panel=DEPS)] = None,
+    pip: Annotated[Optional[List[str]], typer.Option("--pip", help="Pip spec (repeatable).", rich_help_panel=DEPS)] = None,
+    channels: Annotated[Optional[List[str]], typer.Option("-c", "--channel", help="Channel (repeatable).", rich_help_panel=DEPS)] = None,
+    kernel: Annotated[Optional[str], typer.Option("--kernel", help="Kernel name (xpython, xr, xlua, xjavascript, ...) or package.", rich_help_panel=DEPS)] = None,
+    mounts: Annotated[Optional[List[str]], typer.Option("--mount", metavar="SRC:DST[:ro|rw]", help="Expose host files to the kernel (copied in at start; rw writes back after every cell).", rich_help_panel=EXEC)] = None,
+    cwd: Annotated[Optional[str], typer.Option("--cwd", help="Kernel working directory (default /home/xnb).", rich_help_panel=EXEC)] = None,
+    cell_timeout: Annotated[Optional[float], typer.Option("--cell-timeout", help="Per-cell timeout in seconds.", rich_help_panel=EXEC)] = None,
+    max_memory: Annotated[Optional[int], typer.Option("--max-memory", metavar="MB", help="JS heap limit for the browser.", rich_help_panel=EXEC)] = None,
+    strict: Annotated[bool, typer.Option("--strict", help="Refuse to run Chromium without its OS sandbox.", rich_help_panel=EXEC)] = False,
+    user: Annotated[bool, typer.Option("--user", help="Install for the current user (default).")] = False,
+    sys_prefix: Annotated[bool, typer.Option("--sys-prefix", help="Install into this Python environment (sys.prefix).")] = False,
+    prefix: Annotated[Optional[Path], typer.Option("--prefix", help="Install into PREFIX/share/jupyter/kernels.")] = None,
+) -> None:
+    """Install a kernelspec whose kernel runs sealed with a fixed set of packages."""
+    from .kernelspec import KernelSpecError, install
+
+    if sum([user, sys_prefix, prefix is not None]) > 1:
+        _fail("--user, --sys-prefix and --prefix are mutually exclusive", 2)
+    try:
+        target = install(
+            name,
+            env_file=env_file,
+            deps=deps or [],
+            pip=pip or [],
+            channels=channels or [],
+            kernel=kernel,
+            display_name=display_name,
+            mounts=mounts or [],
+            cwd=cwd,
+            cell_timeout=cell_timeout,
+            max_memory_mb=max_memory,
+            strict=strict,
+            prefix=prefix,
+            sys_prefix=sys_prefix,
+        )
+    except (OSError, KernelSpecError, MountError) as e:
+        _fail(str(e), 2)
+    typer.echo(f"installed kernelspec {name} in {target}")
+
+
+@kernel_app.command("start", hidden=True)
+def kernel_start_command(
+    spec_dir: Annotated[Path, typer.Option("--spec-dir", help="Kernelspec directory written by `xnb kernel install`.")],
+    connection_file: Annotated[Path, typer.Option("-f", "--connection-file", help="Jupyter connection file.")],
+    offline: Annotated[bool, typer.Option("--offline", help="Never contact upstream; use the cache only.")] = False,
+    browser_path: Annotated[Optional[str], typer.Option("--browser-path", help="Use this Chromium/chrome-headless-shell binary.")] = None,
+    cache_dir: Annotated[Optional[Path], typer.Option("--cache-dir", help="Cache directory.")] = None,
+    debug: Annotated[bool, typer.Option("--debug", help="Verbose logs on stderr.")] = False,
+) -> None:
+    """Run a kernel for Jupyter (started by Jupyter from the kernelspec)."""
+    try:
+        from .kernel import start
+    except ImportError as e:
+        _fail(f"{e}; install the kernel extra: pip install 'xnotebook[kernel]'", 2)
+    try:
+        code = start(
+            spec_dir, connection_file, offline=offline, browser_path=browser_path, cache_dir=cache_dir, debug=debug
+        )
+    except (OSError, ValueError, MountError) as e:
+        _fail(str(e), 2)
+    raise typer.Exit(code)
+
+
 def _version(value: bool) -> None:
     if value:
         typer.echo(f"xnb {__version__}")
@@ -320,7 +392,7 @@ def _fail(message: str, code: int) -> "typer.Exit":
     raise typer.Exit(code)
 
 
-COMMANDS = {"run", "setup", "cache", "mcp"}
+COMMANDS = {"run", "setup", "cache", "mcp", "kernel"}
 
 
 def main(argv: Optional[List[str]] = None) -> int:

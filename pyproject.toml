@@ -20,7 +20,8 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
-test = ["pytest>=7", "nbformat>=5", "jsonschema>=4"]
+kernel = ["pyzmq>=24"]
+test = ["pytest>=7", "nbformat>=5", "jsonschema>=4", "pyzmq>=24", "jupyter_client>=7"]
 
 [project.scripts]
 xnb = "xnotebook.cli:main"

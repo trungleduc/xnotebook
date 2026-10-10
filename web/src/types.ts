@@ -37,6 +37,8 @@ export interface IJob {
   cwd?: string | null;
   /** Ask the host for cells one at a time (`next`) instead of running `content`. */
   interactive?: boolean;
+  /** Relay raw Jupyter messages between the host and the kernel (`xnb kernel start`). */
+  bridge?: boolean;
 }
 
 export type Output = Record<string, any>;

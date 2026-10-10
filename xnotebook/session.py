@@ -217,7 +217,7 @@ class Session:
             if kind == "console":
                 self._console(data)
                 continue
-            if kind in ("exec", "close"):
+            if kind in ("exec", "close", "kmsg"):
                 self._command(conn, sid, kind, data)
                 continue
             msg = json.loads(data)
@@ -242,6 +242,8 @@ class Session:
                 self.on_event(msg.get("event", {}))
             elif mtype == "next":
                 self._next(conn, sid, msg)
+            elif mtype in ("kmsg", "mounts"):
+                self._page_message(msg)
             elif mtype == "done":
                 return msg["result"]
             elif mtype == "error":
@@ -255,6 +257,9 @@ class Session:
         raise RunError("the page asked for a cell, but this is not an interactive session")
 
     def _command(self, conn, sid: str, kind: str, data: Any) -> None:
+        pass
+
+    def _page_message(self, msg: dict) -> None:
         pass
 
     def _console(self, params: dict) -> None:

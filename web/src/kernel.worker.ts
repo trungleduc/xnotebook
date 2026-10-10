@@ -68,10 +68,13 @@ interface IBootMessage {
   stdin: string[] | null;
   mounts: { dst: string; mode: string; files: { path: string; data: string }[]; dirs: string[] }[];
   cwd: string | null;
+  /** Bridge mode: input() waits on this buffer for the frontend's input_reply. */
+  stdinBuffer: SharedArrayBuffer | null;
 }
 
 let xserver: any = null;
 let stdinLines: string[] | null = null;
+let stdinBuffer: SharedArrayBuffer | null = null;
 let currentParent: any = null;
 
 ctx.toplevel_promise = null;
@@ -93,8 +96,23 @@ function uuid(): string {
   return crypto.randomUUID().replace(/-/g, '');
 }
 
-// input() support: answer synchronously from the lines given with --stdin.
+/** Ask the host for the answer to an input_request and block until it arrives. */
+function waitForInput(request: any): any {
+  const buffer = stdinBuffer as SharedArrayBuffer;
+  const ctrl = new Int32Array(buffer, 0, 2);
+  Atomics.store(ctrl, 0, 0);
+  post({ xnb: 'input_request', msg: request });
+  Atomics.wait(ctrl, 0, 0);
+  const n = Atomics.load(ctrl, 1);
+  return JSON.parse(new TextDecoder().decode(new Uint8Array(buffer, 8, n).slice()));
+}
+
+// input() support: ask the frontend (bridge mode), or answer synchronously from the
+// lines given with --stdin.
 ctx.get_stdin = (request: any) => {
+  if (stdinBuffer && request?.header) {
+    return waitForInput(request);
+  }
   const parent = request?.header ? request : currentParent;
   let value = '';
   let status = 'ok';
@@ -145,6 +163,7 @@ function stripSlash(p: string): string {
 
 async function boot(msg: IBootMessage): Promise<any> {
   stdinLines = msg.stdin ? [...msg.stdin] : null;
+  stdinBuffer = msg.stdinBuffer ?? null;
   mem.set(MEM + 'unpack.wasm', new Uint8Array(msg.untarWasm));
   const untarjs = await initUntarJS(() => MEM + 'unpack.wasm');
   const pythonVersion = getPythonVersion({ packages: msg.lockPackages } as any);

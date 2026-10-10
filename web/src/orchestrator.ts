@@ -6,10 +6,13 @@ import { computeLockId } from '@emscripten-forge/mambajs-core';
 import { debug, emit, progress, request, send, step } from './host';
 import { mergeEnv } from './deps';
 import { channelUrls, downloadAll, formatBytes, lockChannelUrls, lockFiles, solveEnv } from './solve';
-import { KernelClient, makeMessage, normalizeEname, OutputTracker } from './executor';
+import { IKernelMessage, KernelClient, makeMessage, normalizeEname, OutputTracker } from './executor';
 import { ensureCellIds, parseNotebook, scriptToNotebook, sourceText } from './formats';
 import { WidgetStateTracker } from './widgets';
 import { ICell, IJob, INotebook, IRunResult, Output } from './types';
+
+/** Control words (state, length) followed by the JSON of the input_reply. */
+const STDIN_BUFFER_BYTES = 8 + (1 << 20);
 
 async function fetchBytes(url: string): Promise<ArrayBuffer> {
   const resp = await fetch(url);
@@ -78,6 +81,8 @@ async function main(): Promise<void> {
   progress(`starting kernel ${env.kernelName || env.kernelPackage}...`);
   const tBoot = performance.now();
 
+  // Bridge mode: input() blocks the worker on this buffer until the frontend answers.
+  const stdinBuffer = job.bridge && crossOriginIsolated ? new SharedArrayBuffer(STDIN_BUFFER_BYTES) : null;
   const kernel = new KernelClient(worker);
   kernel.onDebug = m => debug(m);
   const ready = new Promise<any>((resolve, reject) => {
@@ -103,7 +108,8 @@ async function main(): Promise<void> {
       kernelPackage: env.kernelPackage,
       stdin: job.stdin ?? null,
       mounts: job.mounts ?? [],
-      cwd: job.cwd ?? null
+      cwd: job.cwd ?? null,
+      stdinBuffer
     },
     [...downloaded.map(d => d.data), untarWasm]
   );
@@ -111,9 +117,11 @@ async function main(): Promise<void> {
   progress(`kernel ready: ${spec.display_name} (${((performance.now() - tBoot) / 1000).toFixed(1)}s)`);
   emit({ kind: 'kernel_ready', spec });
 
-  const result = job.interactive
-    ? await interactive(job, nb, kernel, spec)
-    : await execute(job, nb, kernel, spec, lock);
+  const result = job.bridge
+    ? await bridge(job, nb, kernel, stdinBuffer)
+    : job.interactive
+      ? await interactive(job, nb, kernel, spec)
+      : await execute(job, nb, kernel, spec, lock);
   send({ type: 'done', result });
 }
 
@@ -356,6 +364,89 @@ async function interactive(job: IJob, nb: INotebook, kernel: KernelClient, spec:
   ensureCellIds(nb);
   const mounts = await collectMounts(job, kernel, true);
   return { notebook: nb, status, failedCell, error, mounts, last };
+}
+
+function toBase64(data: Uint8Array): string {
+  let s = '';
+  for (let i = 0; i < data.length; i += 0x8000) {
+    s += String.fromCharCode(...data.subarray(i, i + 0x8000));
+  }
+  return btoa(s);
+}
+
+function fromBase64(s: string): Uint8Array {
+  const bin = atob(s);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) {
+    out[i] = bin.charCodeAt(i);
+  }
+  return out;
+}
+
+/** Binary buffers cross the CDP bridge as base64 strings. */
+function encodeBuffers(msg: IKernelMessage): IKernelMessage {
+  const buffers = (msg.buffers ?? []).map((b: any) =>
+    toBase64(b instanceof ArrayBuffer ? new Uint8Array(b) : new Uint8Array(b.buffer, b.byteOffset, b.byteLength))
+  );
+  return { ...msg, buffers };
+}
+
+function decodeBuffers(msg: IKernelMessage): IKernelMessage {
+  const buffers = (msg.buffers ?? []).map((b: string) => {
+    const bytes = fromBase64(b);
+    return new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  });
+  return { ...msg, buffers };
+}
+
+/** Hand an input_reply to the worker blocked in get_stdin. */
+function answerStdin(stdinBuffer: SharedArrayBuffer, msg: IKernelMessage): void {
+  const ctrl = new Int32Array(stdinBuffer, 0, 2);
+  let data = new TextEncoder().encode(JSON.stringify(msg));
+  if (data.length > stdinBuffer.byteLength - 8) {
+    const error = { ...msg, content: { value: '', status: 'error' } };
+    data = new TextEncoder().encode(JSON.stringify(error));
+  }
+  new Uint8Array(stdinBuffer, 8, data.length).set(data);
+  Atomics.store(ctrl, 1, data.length);
+  Atomics.store(ctrl, 0, 1);
+  Atomics.notify(ctrl, 0);
+}
+
+/**
+ * Kernel bridge: every kernel message goes to the host (`kmsg`), and the host delivers
+ * frontend messages through `__xnbKernel`. Runs until the kernel dies.
+ */
+async function bridge(
+  job: IJob,
+  nb: INotebook,
+  kernel: KernelClient,
+  stdinBuffer: SharedArrayBuffer | null
+): Promise<IRunResult> {
+  const rw = hasRwMounts(job);
+  kernel.onAnyMessage = m => send({ type: 'kmsg', msg: encodeBuffers(m) });
+  kernel.worker.addEventListener('message', ev => {
+    if (ev.data?.xnb === 'input_request') {
+      send({ type: 'kmsg', msg: encodeBuffers({ ...ev.data.msg, channel: 'stdin' }) });
+    } else if (ev.data?.xnb === 'collected') {
+      send({ type: 'mounts', mounts: ev.data.mounts });
+    }
+  });
+  window.__xnbKernel = (msg: IKernelMessage) => {
+    if (msg.channel === 'stdin') {
+      if (stdinBuffer && msg.header.msg_type === 'input_reply') {
+        answerStdin(stdinBuffer, msg);
+      }
+      return;
+    }
+    kernel.worker.postMessage({ xnb: 'msg', msg: decodeBuffers(msg) });
+    if (rw && msg.header.msg_type === 'execute_request') {
+      kernel.worker.postMessage({ xnb: 'collect', changed: true });
+    }
+  };
+  const reason = await new Promise<string>(resolve => kernel.onDead(resolve));
+  window.__xnbKernel = undefined;
+  return { notebook: nb, status: 'error', error: `kernel died: ${reason}` };
 }
 
 main().catch(e => {

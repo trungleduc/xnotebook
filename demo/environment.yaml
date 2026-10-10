@@ -1,0 +1,12 @@
+# Environment for the demo kernel:
+#   xnb kernel install --name xnb-demo -e demo/environment.yaml
+channels:
+  - https://prefix.dev/emscripten-forge-4x
+  - conda-forge
+dependencies:
+  - numpy
+  - pandas
+  - matplotlib
+  - ipywidgets
+  - pip:
+      - six
