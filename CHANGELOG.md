@@ -1,3 +1,10 @@
+# [1.2.0](https://github.com/trungleduc/xnotebook/compare/v1.1.0...v1.2.0) (2026-10-10)
+
+
+### Features
+
+* read-write mount ([e2c4822](https://github.com/trungleduc/xnotebook/commit/e2c4822e62489e5728cb6a2305bc0e6f4578c80f))
+
 # [1.1.0](https://github.com/trungleduc/xnotebook/compare/v1.0.0...v1.1.0) (2026-10-08)
 
 
