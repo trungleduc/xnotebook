@@ -14,6 +14,7 @@ import {
   waitRunDependencies
 } from '@emscripten-forge/mambajs-core';
 import { initUntarJS } from '@emscripten-forge/untarjs';
+import { wheelPath } from './wheels';
 
 declare function importScripts(...urls: string[]): void;
 declare function createXeusModule(options: any): Promise<any>;
@@ -170,9 +171,10 @@ async function boot(msg: IBootMessage): Promise<any> {
         throw new Error('cannot install wheels without Python in the environment');
       }
       const raw = await untarjs.extractData(data, false);
+      const sitePackages = `lib/python${pythonVersion[0]}.${pythonVersion[1]}/site-packages`;
       files = {};
       for (const [k, v] of Object.entries(raw)) {
-        files[`lib/python${pythonVersion[0]}.${pythonVersion[1]}/site-packages/${k}`] = v;
+        files[wheelPath(k, sitePackages)] = v;
       }
     }
     extracted.push({ filename: pkg.filename, name: msg.lockPackages[pkg.filename]?.name ?? pkg.filename, files });
@@ -263,6 +265,7 @@ async function boot(msg: IBootMessage): Promise<any> {
   let nFiles = 0;
   for (const e of extracted) {
     sharedLibs[e.name] = getSharedLibs(e.files, '');
+    patchSources(e.files);
     saveFilesIntoEmscriptenFS(Module.FS, e.files, '');
     nFiles += Object.keys(e.files).length;
   }
@@ -279,6 +282,7 @@ async function boot(msg: IBootMessage): Promise<any> {
     }
     step(`mounted ${m.files.length} files at ${m.dst} (${m.mode})`);
   }
+  collectMounts(msg.mounts, 'baseline');
   if (msg.cwd) {
     Module.FS.mkdirTree(msg.cwd);
     Module.FS.chdir(msg.cwd);
@@ -314,7 +318,17 @@ async function boot(msg: IBootMessage): Promise<any> {
   };
 }
 
-function collectMounts(mounts: IBootMessage['mounts']): { dst: string; files: { path: string; data: string }[] }[] {
+/** rw-mount file -> "mtime:size" when it was last collected (or mounted). */
+const collected = new Map<string, string>();
+
+/**
+ * Files under rw mounts: all of them, only those changed since the last collect, or
+ * none ('baseline': just remember the current state, right after mounting).
+ */
+function collectMounts(
+  mounts: IBootMessage['mounts'],
+  mode: 'all' | 'changed' | 'baseline' = 'all'
+): { dst: string; files: { path: string; data: string }[] }[] {
   const FS = ctx.Module?.FS;
   const out: { dst: string; files: { path: string; data: string }[] }[] = [];
   if (!FS) {
@@ -339,13 +353,91 @@ function collectMounts(mounts: IBootMessage['mounts']): { dst: string; files: { 
           }
         }
       } else if (FS.isFile(st.mode)) {
-        files.push({ path: p, data: b64encode(FS.readFile(p)) });
+        const stamp = `${+st.mtime}:${st.size}`;
+        const unchanged = collected.get(p) === stamp;
+        collected.set(p, stamp);
+        if (mode === 'all' || (mode === 'changed' && !unchanged)) {
+          files.push({ path: p, data: b64encode(FS.readFile(p)) });
+        }
       }
     };
     walk(m.dst);
     out.push({ dst: m.dst, files });
   }
   return out;
+}
+
+/** One file (base64) or a directory listing from the kernel filesystem. */
+function readPath(path: string, maxBytes: number): Record<string, any> {
+  const FS = ctx.Module?.FS;
+  if (!FS) {
+    return { error: 'the kernel filesystem is not ready' };
+  }
+  let abs: string;
+  let st: any;
+  try {
+    abs = FS.lookupPath(path, { follow: true }).path;
+    st = FS.stat(abs);
+  } catch {
+    return { error: `no such file or directory: ${path}` };
+  }
+  if (FS.isDir(st.mode)) {
+    const entries = FS.readdir(abs)
+      .filter((n: string) => n !== '.' && n !== '..')
+      .map((name: string) => {
+        const child = FS.stat(`${abs.replace(/\/$/, '')}/${name}`);
+        return { name, dir: FS.isDir(child.mode), size: child.size };
+      });
+    return { path: abs, entries };
+  }
+  if (!FS.isFile(st.mode)) {
+    return { path: abs, error: `not a regular file: ${abs}` };
+  }
+  if (st.size > maxBytes) {
+    return { path: abs, size: st.size, error: `${abs} is ${st.size} bytes; the limit is ${maxBytes}` };
+  }
+  return { path: abs, size: st.size, data: b64encode(FS.readFile(abs)) };
+}
+
+// pyodide-http (loaded by xeus-python to patch urllib/requests) starts a streaming-HTTP
+// helper worker whenever the page is cross-origin isolated, through a Pyodide-only to_js()
+// option that pyjs lacks, so the kernel fails to start. A sealed kernel has nothing to
+// stream from: keep pyodide-http on its plain path.
+const SOURCE_PATCHES = [
+  {
+    suffix: 'pyodide_http/_streaming.py',
+    from: 'if crossOriginIsolated:\n    _fetcher = _StreamingFetcher()',
+    to: 'if False:  # xnb: sealed kernel, nothing to stream\n    _fetcher = _StreamingFetcher()'
+  }
+];
+
+function patchSources(files: Record<string, Uint8Array>): void {
+  for (const [path, data] of Object.entries(files)) {
+    for (const patch of SOURCE_PATCHES) {
+      if (!path.endsWith(patch.suffix)) {
+        continue;
+      }
+      const text = new TextDecoder().decode(data);
+      if (text.includes(patch.from)) {
+        files[path] = new TextEncoder().encode(text.replace(patch.from, patch.to));
+        step(`patched ${path}`);
+      }
+    }
+  }
+}
+
+/** Readable text for an error, including C++ exceptions thrown out of the wasm module. */
+function describeError(e: any): string {
+  const Exc = (WebAssembly as any).Exception;
+  if (Exc && e instanceof Exc && ctx.Module?.getExceptionMessage) {
+    try {
+      const [type, message] = ctx.Module.getExceptionMessage(e);
+      return `${type}: ${message}`;
+    } catch {
+      // fall through
+    }
+  }
+  return String(e?.stack ?? e?.message ?? e);
 }
 
 let bootMsg: IBootMessage | null = null;
@@ -368,10 +460,13 @@ ctx.onmessage = (ev: MessageEvent) => {
         post({ xnb: 'synced', id: msg.id });
       } else if (msg.xnb === 'collect') {
         await flushToplevel();
-        post({ xnb: 'collected', mounts: collectMounts(bootMsg?.mounts ?? []) });
+        post({ xnb: 'collected', mounts: collectMounts(bootMsg?.mounts ?? [], msg.changed ? 'changed' : 'all') });
+      } else if (msg.xnb === 'read') {
+        await flushToplevel();
+        post({ xnb: 'read-result', result: readPath(msg.path, msg.maxBytes) });
       }
     } catch (e: any) {
-      post({ xnb: 'fatal', message: String(e?.stack ?? e?.message ?? e) });
+      post({ xnb: 'fatal', message: describeError(e) });
     }
   });
 };

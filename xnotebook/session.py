@@ -303,9 +303,9 @@ class Session:
 class InteractiveSession(Session):
     """A kernel that stays up and runs cells one at a time.
 
-    The page asks for each cell with a `next` request (carrying the report of the
-    previous cell); the session loop runs on a background thread and answers it with
-    code from `execute()`, or with `close`.
+    The page asks for each command with a `next` request (carrying the result of the
+    previous one); the session loop runs on a background thread and answers it with code
+    from `execute()`, a path from `read_file()`, or `close`.
     """
 
     def __init__(self, job: Dict[str, Any], **kwargs: Any) -> None:
@@ -317,7 +317,7 @@ class InteractiveSession(Session):
         self._finished = threading.Event()
         self._exec_lock = threading.Lock()
         self._next_id: Any = None  # the page is waiting for code under this request id
-        self._queued: Deque[Tuple[str, Future]] = deque()
+        self._queued: Deque[Tuple[dict, Future]] = deque()
         self._current: Optional[Future] = None
         self._closing = False
         self._thread: Optional[threading.Thread] = None
@@ -349,12 +349,21 @@ class InteractiveSession(Session):
         return self
 
     def execute(self, code: str, timeout: Optional[float] = None) -> dict:
-        """Run one cell; return its report: cell, status, error, executionCount, outputs."""
+        """Run one cell; return its report: cell, status, error, executionCount, outputs,
+        and `mounts` (files under rw mounts that changed during the cell)."""
+        return self._send({"code": code}, timeout)
+
+    def read_file(self, path: str, max_bytes: int, timeout: Optional[float] = 60) -> dict:
+        """A file of the kernel filesystem: {path, size, data (base64)}, {path, entries} for a
+        directory, or {error}."""
+        return self._send({"read": path, "maxBytes": max_bytes}, timeout)
+
+    def _send(self, command: dict, timeout: Optional[float]) -> dict:
         with self._exec_lock:
             if self.dead is not None:
                 raise RunError(f"session ended: {self.dead}")
             fut: Future = Future()
-            self._inbox.put(("exec", (code, fut)))
+            self._inbox.put(("exec", (command, fut)))
             try:
                 return fut.result(timeout)
             except FutureTimeout:
@@ -419,9 +428,9 @@ class InteractiveSession(Session):
         if self._closing:
             self._reply(conn, sid, self._next_id, {"close": True})
         elif self._queued:
-            code, fut = self._queued.popleft()
+            command, fut = self._queued.popleft()
             self._current = fut
-            self._reply(conn, sid, self._next_id, {"code": code})
+            self._reply(conn, sid, self._next_id, command)
         else:
             return
         self._next_id = None

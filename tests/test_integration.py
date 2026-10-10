@@ -282,3 +282,59 @@ def test_mcp_server_tools():
         assert server.sessions == {}
     finally:
         server.shutdown()
+
+
+def test_session_files(tmp_path):
+    from xnotebook.mcp import Config, Server
+
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "kept.txt").write_text("from the host")
+    server = Server(Config(mounts=[f"{out}:/out:rw"], cell_timeout=30, idle_timeout=None))
+    try:
+        def call(name, **args):
+            return server.handle(
+                {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": name, "arguments": args}}
+            )["result"]
+
+        sid = call("session_start", deps=["matplotlib"])["content"][0]["text"].split()[1]
+        first = call("session_exec", session_id=sid, code="open('/out/a.txt', 'w').write('one')")
+        assert (out / "a.txt").read_text() == "one"
+        assert first["content"][-1]["text"] == f"saved to the host: {out / 'a.txt'}"
+        # Only files changed by the cell come back: kept.txt and a.txt are not resent.
+        second = call("session_exec", session_id=sid, code="open('/out/b.txt', 'w').write('two')")
+        assert second["content"][-1]["text"] == f"saved to the host: {out / 'b.txt'}"
+        call("session_exec", session_id=sid, code="open('/out/a.txt', 'w').write('ONE')")
+        assert (out / "a.txt").read_text() == "ONE"
+
+        call(
+            "session_exec",
+            session_id=sid,
+            code="import matplotlib.pyplot as plt\nplt.plot([1, 2]); plt.savefig('plot.png')\n"
+            "open('notes.txt', 'w').write('hello')",
+        )
+        assert call("session_read_file", session_id=sid, path="notes.txt")["content"] == [{"type": "text", "text": "hello"}]
+        image = call("session_read_file", session_id=sid, path="/home/xnb/plot.png")["content"][0]
+        assert image["type"] == "image" and image["mimeType"] == "image/png"
+        listing = call("session_read_file", session_id=sid, path=".")["content"][0]["text"]
+        assert listing.startswith("/home/xnb:") and "notes.txt (5 bytes)" in listing
+        assert call("session_read_file", session_id=sid, path="/nope")["isError"]
+        assert not (out / "plot.png").exists()  # only rw mounts reach the host
+    finally:
+        server.shutdown()
+
+
+def test_shared_array_buffer():
+    result = xnotebook.run(
+        nb(
+            "import pyjs\npyjs.js.crossOriginIsolated",
+            "b = pyjs.js.SharedArrayBuffer.new(8)\na = pyjs.js.Int32Array.new(b)\npyjs.js.Atomics.add(a, 0, 7)\nint(a[0])",
+            "import urllib.request\nurllib.request.urlopen('https://example.com')",
+        ),
+        allow_errors=True,
+        return_result=True,
+    )
+    cells = result["notebook"]["cells"]
+    assert texts(cells[0]) == "True"
+    assert texts(cells[1]) == "7"
+    assert cells[2]["outputs"][-1]["output_type"] == "error"  # still sealed

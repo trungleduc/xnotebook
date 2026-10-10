@@ -91,7 +91,7 @@ xnb FILE [-o OUT|-] [--inplace] [-q]
          [--offline] [--refresh] [--strict] [--browser-path PATH] [--cache-dir DIR] [--debug]
 xnb setup [--from chrome-headless-shell.zip]
 xnb cache {info,clean,prune}
-xnb mcp [--mount SRC:DST[:ro]]... [--cwd DIR] [-c CHANNEL]... [--cell-timeout S] [--idle-timeout S]
+xnb mcp [--mount SRC:DST[:ro|rw]]... [--cwd DIR] [-c CHANNEL]... [--cell-timeout S] [--idle-timeout S]
         [--max-sessions N] [--max-memory MB] [--strict] [--offline] [--browser-path PATH] [--cache-dir DIR] [--debug]
 ```
 
@@ -113,7 +113,7 @@ res = xnotebook.run(nb_dict, allow_errors=True, return_result=True)     # includ
 code interpreter. It speaks stdio only and never opens a port.
 
 ```console
-$ claude mcp add xnb -- xnb mcp --mount ./data:/data
+$ claude mcp add xnb -- xnb mcp --mount ./data:/data --mount ./xnb-out:/out:rw
 ```
 
 ```json
@@ -125,6 +125,9 @@ Tools:
 - `run(code, kernel?, deps?, pip?)`: runs code once in a fresh kernel.
 - `session_start(kernel?, deps?, pip?)` → `session_id`, then `session_exec(session_id, code)`:
   a kernel that keeps its state between calls, like a notebook. `session_close` stops it.
+- `session_read_file(session_id, path)`: returns a file from the kernel's filesystem to the
+  agent, or lists a directory. Text comes back as text, images as images, and other files
+  as a binary resource (at most 10 MB).
 
 Outputs come back as text, with plots as images. Errors set `isError`.
 
@@ -134,7 +137,11 @@ Outputs come back as text, with plots as images. Errors set `isError`.
   Sessions idle for `--idle-timeout` are closed.
 - **Resources:** each session is one Chromium process, and `--max-sessions` caps how many
   run at once (4 by default).
-- **Mounts:** only the person starting the server chooses them, and they are read-only.
+- **Mounts:** only the person starting the server chooses them. Files a kernel writes
+  under an `:rw` mount are saved to the host after every `run` and `session_exec` call,
+  with only changed files sent and the same limits as `xnb run`. So output survives even
+  if a later cell times out. The tool result lists the files it saved. The agent is told
+  which paths are mounted.
 
 The first `session_start` on a cold cache downloads the browser and the packages. Running
 `xnb setup` and one `xnb` run beforehand keeps tool calls fast.

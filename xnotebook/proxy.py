@@ -170,6 +170,14 @@ class _Handler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args) -> None:  # noqa: A002
         pass
 
+    def end_headers(self) -> None:
+        # Cross-origin isolation, so the page and the kernel worker get SharedArrayBuffer.
+        # Every response opts in; upstream fetches already pass CORS.
+        self.send_header("Cross-Origin-Opener-Policy", "same-origin")
+        self.send_header("Cross-Origin-Embedder-Policy", "require-corp")
+        self.send_header("Cross-Origin-Resource-Policy", "same-site")
+        super().end_headers()
+
     # -- helpers ----------------------------------------------------------
     def _cors(self) -> None:
         self.send_header("Access-Control-Allow-Origin", "*")

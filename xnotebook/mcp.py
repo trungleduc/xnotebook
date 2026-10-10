@@ -5,13 +5,16 @@ stdio only, no dependencies. stdout carries protocol messages only; logs go to s
 
 Tools run code on the same sandboxed kernels as `xnb run`: either one-shot (`run`) or in
 an `InteractiveSession` that keeps its state between calls (`session_*`). Host files and
-other server-wide settings come from the command line, never from the model.
+other server-wide settings come from the command line, never from the model; files the
+kernel writes under an rw mount are saved back after every call.
 """
 
 from __future__ import annotations
 
+import base64
 import itertools
 import json
+import mimetypes
 import re
 import signal
 import sys
@@ -19,19 +22,23 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, BinaryIO, Callable, Dict, List, Optional, Set, Tuple
+from contextlib import contextmanager
+from typing import Any, BinaryIO, Callable, Dict, Iterator, List, Optional, Set, Tuple
 
 from . import __version__
+from .mounts import MountError, parse_mount, write_back
 
 PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
 MAX_TEXT = 20_000
 MAX_IMAGES = 8
+MAX_READ_BYTES = 10 << 20
 IMAGE_TYPES = ("image/png", "image/jpeg")
+FILE_IMAGE_TYPES = ("image/png", "image/jpeg", "image/gif", "image/webp")
 ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
 SANDBOX = (
     "Code runs in a WebAssembly kernel inside a sandboxed browser: no network, no subprocesses, "
-    "no host files except the read-only mounts the server was started with. Packages are "
+    "no host files except the mounts the server was started with. Packages are "
     "emscripten-forge conda packages (`deps`, e.g. numpy, pandas, matplotlib) and pure-Python "
     "pip wheels (`pip`), installed when the kernel starts."
 )
@@ -82,6 +89,17 @@ TOOLS: List[Dict[str, Any]] = [
             "type": "object",
             "properties": {"session_id": {"type": "string"}, "code": _CODE},
             "required": ["session_id", "code"],
+        },
+    },
+    {
+        "name": "session_read_file",
+        "description": "Read a file the session's code wrote (or list a directory) in the kernel's "
+        "filesystem. Text comes back as text, images as images, other files as a binary resource "
+        f"(at most {MAX_READ_BYTES >> 20} MB). Relative paths start at the kernel's working directory.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"session_id": {"type": "string"}, "path": {"type": "string"}},
+            "required": ["session_id", "path"],
         },
     },
     {
@@ -219,6 +237,29 @@ def report_to_content(report: Optional[dict], max_text: int = MAX_TEXT) -> Tuple
     return items, status != "ok"
 
 
+def file_to_content(result: dict) -> Tuple[List[dict], bool]:
+    """Tool content for a session_read_file result: listing, text, image, or binary resource."""
+    if result.get("error"):
+        return [{"type": "text", "text": result["error"]}], True
+    path = result.get("path", "")
+    if "entries" in result:
+        lines = [
+            f"{e['name']}/" if e.get("dir") else f"{e['name']} ({e.get('size', 0)} bytes)"
+            for e in sorted(result["entries"], key=lambda e: e["name"])
+        ]
+        return [{"type": "text", "text": f"{path}:\n" + ("\n".join(lines) or "(empty)")}], False
+    data = base64.b64decode(result.get("data") or "")
+    mime = mimetypes.guess_type(path)[0] or "application/octet-stream"
+    if mime in FILE_IMAGE_TYPES:
+        return [{"type": "image", "data": result["data"], "mimeType": mime}], False
+    if b"\0" not in data:
+        try:
+            return [{"type": "text", "text": _truncate(data.decode("utf-8"), MAX_TEXT)}], False
+        except UnicodeDecodeError:
+            pass
+    return [{"type": "resource", "resource": {"uri": f"file://{path}", "mimeType": mime, "blob": result["data"]}}], False
+
+
 class _Managed:
     def __init__(self, session: Any, kernel: str) -> None:
         self.session = session
@@ -237,6 +278,7 @@ class Server:
         self.config = config or Config()
         self.out = out
         self.factory = factory or default_factory(self.config)
+        self.mounts = [parse_mount(m) for m in self.config.mounts]
         self.sessions: Dict[str, _Managed] = {}
         self._oneshots: Set[Any] = set()  # kernels of `run` calls in flight
         self._ids = itertools.count(1)
@@ -297,7 +339,7 @@ class Server:
             elif method == "ping":
                 result = {}
             elif method == "tools/list":
-                result = {"tools": TOOLS}
+                result = {"tools": self.tools()}
             elif method == "tools/call":
                 result = self._call(params)
             elif not is_request:
@@ -317,8 +359,25 @@ class Server:
             "protocolVersion": asked if asked in PROTOCOL_VERSIONS else PROTOCOL_VERSIONS[0],
             "capabilities": {"tools": {}},
             "serverInfo": {"name": "xnb", "version": __version__},
-            "instructions": INSTRUCTIONS,
+            "instructions": INSTRUCTIONS + self._mount_note(),
         }
+
+    def _mount_note(self) -> str:
+        if not self.mounts:
+            return ""
+        described = [
+            f"{m.dst} (read-write: files written there are saved to the user's disk after each call)"
+            if m.mode == "rw"
+            else f"{m.dst} (read-only)"
+            for m in self.mounts
+        ]
+        return " Host files mounted in every kernel: " + "; ".join(described) + "."
+
+    def tools(self) -> List[Dict[str, Any]]:
+        note = self._mount_note()
+        if not note:
+            return TOOLS
+        return [{**t, "description": t["description"] + note} if t["name"] in ("run", "session_start") else t for t in TOOLS]
 
     def _call(self, params: dict) -> dict:
         name = params.get("name")
@@ -341,7 +400,7 @@ class Server:
         with self._lock:
             self._oneshots.add(session)
         try:
-            return report_to_content(self._execute(session, code))
+            return self._result(self._execute(session, code))
         finally:
             with self._lock:
                 owned = session in self._oneshots
@@ -363,23 +422,21 @@ class Server:
         return [{"type": "text", "text": "\n".join(lines)}], False
 
     def _tool_session_exec(self, args: dict) -> Tuple[List[dict], bool]:
-        sid = _arg_str(args, "session_id")
         code = _arg_str(args, "code")
-        with self._lock:
-            managed = self.sessions.get(sid)
-            if managed is not None:
-                managed.busy += 1
-        if managed is None:
-            raise ToolError(f"no session {sid!r} (closed, or ended after being idle); start a new one")
-        try:
-            report = self._execute(managed.session, code)
-        finally:
-            with self._lock:
-                managed.busy -= 1
-                managed.last_used = time.time()
-        if not managed.session.alive:
-            self._drop(sid)
-        return report_to_content(report)
+        with self._use(_arg_str(args, "session_id")) as session:
+            report = self._execute(session, code)
+        return self._result(report)
+
+    def _tool_session_read_file(self, args: dict) -> Tuple[List[dict], bool]:
+        from .session import RunError
+
+        path = _arg_str(args, "path")
+        with self._use(_arg_str(args, "session_id")) as session:
+            try:
+                result = session.read_file(path, MAX_READ_BYTES)
+            except RunError as e:
+                raise ToolError(str(e)) from None
+        return file_to_content(result)
 
     def _tool_session_close(self, args: dict) -> Tuple[List[dict], bool]:
         sid = _arg_str(args, "session_id")
@@ -388,6 +445,41 @@ class Server:
         return [{"type": "text", "text": f"closed {sid}"}], False
 
     # -- sessions -----------------------------------------------------------
+    @contextmanager
+    def _use(self, sid: str) -> Iterator[Any]:
+        """A live session by id, marked busy so the idle reaper leaves it alone."""
+        with self._lock:
+            managed = self.sessions.get(sid)
+            if managed is not None:
+                managed.busy += 1
+        if managed is None:
+            raise ToolError(f"no session {sid!r} (closed, or ended after being idle); start a new one")
+        try:
+            yield managed.session
+        finally:
+            with self._lock:
+                managed.busy -= 1
+                managed.last_used = time.time()
+            if not managed.session.alive:
+                self._drop(sid)
+
+    def _result(self, report: dict) -> Tuple[List[dict], bool]:
+        """Tool content for a cell report, after saving files written under rw mounts."""
+        content, is_error = report_to_content(report)
+        written: List[str] = []
+        by_dst = {m.dst: m for m in self.mounts if m.mode == "rw"}
+        for out in report.get("mounts") or []:
+            m = by_dst.get(out.get("dst"))
+            if m is None:
+                continue
+            try:
+                written += [str(p) for p in write_back(m, out.get("files") or [])]
+            except MountError as e:
+                content.append({"type": "text", "text": f"files not saved: {e}"})
+        if written:
+            content.append({"type": "text", "text": "saved to the host: " + ", ".join(written)})
+        return content, is_error
+
     def _start(self, args: dict) -> Any:
         kernel = _arg_str(args, "kernel", "xpython")
         deps = _arg_list(args, "deps")

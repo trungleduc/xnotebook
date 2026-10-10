@@ -1,5 +1,6 @@
 """`xnb mcp` protocol and tools, with a fake session (no browser needed)."""
 
+import base64
 import io
 import json
 import subprocess
@@ -8,12 +9,19 @@ import sys
 import pytest
 
 from xnotebook.cli import main
-from xnotebook.mcp import TOOLS, Config, Server, report_to_content
+from xnotebook.mcp import TOOLS, Config, Server, file_to_content, report_to_content
 from xnotebook.session import RunError
 
 
+def b64(data):
+    return base64.b64encode(data).decode()
+
+
 class FakeSession:
-    """Evaluates Python expressions; `boom` fails the cell, `hang` ends the session."""
+    """Evaluates Python expressions; `boom` fails the cell, `hang` ends the session,
+    `write <path> <text>` reports a file written under an rw mount."""
+
+    files = {}  # what read_file serves
 
     started = []
 
@@ -40,6 +48,10 @@ class FakeSession:
         if code == "hang":
             self.dead = "cell 0 timed out after 1s"
             return {"status": "timeout", "error": self.dead, "outputs": []}
+        if code.startswith("write "):
+            _, path, text = code.split(" ", 2)
+            files = [{"path": path, "data": b64(text.encode())}]
+            return {"status": "ok", "outputs": [], "mounts": [{"dst": "/out", "files": files}]}
         if code == "boom":
             return {
                 "status": "error",
@@ -51,6 +63,11 @@ class FakeSession:
             return {"status": "ok", "outputs": []}
         value = eval(code, self.ns)
         return {"status": "ok", "outputs": [{"output_type": "execute_result", "data": {"text/plain": repr(value)}}]}
+
+    def read_file(self, path, max_bytes, timeout=60):
+        if self.dead:
+            raise RunError(f"session ended: {self.dead}")
+        return FakeSession.files.get(path, {"error": f"no such file or directory: {path}"})
 
     def close(self, timeout=30):
         self.closed = True
@@ -93,7 +110,7 @@ def test_initialize_negotiates_version(server):
 
 def test_tools_list(server):
     tools = rpc(server, "tools/list")["result"]["tools"]
-    assert [t["name"] for t in tools] == ["run", "session_start", "session_exec", "session_close"]
+    assert [t["name"] for t in tools] == ["run", "session_start", "session_exec", "session_read_file", "session_close"]
     for t in tools:
         assert t["inputSchema"]["type"] == "object"
         assert t["description"]
@@ -221,6 +238,57 @@ def test_stdio_subprocess():
     assert "serving on stdio" in proc.stderr
 
 
-def test_cli_refuses_rw_mount(tmp_path, capsys):
-    assert main(["mcp", "--mount", f"{tmp_path}:/data:rw"]) == 2
-    assert "read-only" in capsys.readouterr().err
+def test_cli_checks_mounts(tmp_path, capsys):
+    assert main(["mcp", "--mount", f"{tmp_path / 'missing'}:/data"]) == 2
+    assert "does not exist" in capsys.readouterr().err
+
+
+def test_rw_mount_saved_after_each_call(tmp_path):
+    out = tmp_path / "out"
+    out.mkdir()
+    server = Server(Config(mounts=[f"{tmp_path}:/data", f"{out}:/out:rw"], idle_timeout=None), factory=FakeSession)
+    try:
+        init = rpc(server, "initialize")["result"]["instructions"]
+        assert "/data (read-only)" in init and "/out (read-write" in init
+        tools = {t["name"]: t["description"] for t in rpc(server, "tools/list")["result"]["tools"]}
+        assert "/out (read-write" in tools["run"] and "/out" not in tools["session_exec"]
+
+        call(server, "session_start")
+        res = call(server, "session_exec", session_id="s1", code="write /out/sub/a.txt hello")
+        assert (out / "sub" / "a.txt").read_text() == "hello"
+        assert text(res).endswith(f"saved to the host: {out / 'sub' / 'a.txt'}")
+        call(server, "session_exec", session_id="s1", code="write /out/../escape.txt x")
+        assert not (tmp_path / "escape.txt").exists()
+        res = call(server, "run", code="write /out/b.txt once")
+        assert (out / "b.txt").read_text() == "once"
+    finally:
+        server.shutdown()
+
+
+def test_read_file(server):
+    png = b"\x89PNG\r\n\x1a\n"
+    FakeSession.files = {
+        "notes.txt": {"path": "/home/xnb/notes.txt", "size": 5, "data": b64(b"hello")},
+        "plot.png": {"path": "/home/xnb/plot.png", "size": len(png), "data": b64(png)},
+        "blob.bin": {"path": "/home/xnb/blob.bin", "size": 3, "data": b64(b"\0\1\2")},
+        ".": {"path": "/home/xnb", "entries": [{"name": "plot.png", "dir": False, "size": 8}, {"name": "d", "dir": True, "size": 0}]},
+    }
+    call(server, "session_start")
+
+    def read(path):
+        return call(server, "session_read_file", session_id="s1", path=path)
+
+    assert read("notes.txt")["content"] == [{"type": "text", "text": "hello"}]
+    assert read("plot.png")["content"] == [{"type": "image", "data": b64(png), "mimeType": "image/png"}]
+    blob = read("blob.bin")["content"][0]
+    assert blob["type"] == "resource"
+    assert blob["resource"] == {"uri": "file:///home/xnb/blob.bin", "mimeType": "application/octet-stream", "blob": b64(b"\0\1\2")}
+    assert text(read(".")) == "/home/xnb:\nd/\nplot.png (8 bytes)"
+    missing = read("nope.txt")
+    assert missing["isError"] and "no such file" in text(missing)
+    assert call(server, "session_read_file", session_id="s9", path="x")["isError"]
+
+
+def test_file_to_content_errors():
+    content, is_error = file_to_content({"path": "/big", "size": 1 << 30, "error": "/big is too large"})
+    assert is_error and content[0]["text"] == "/big is too large"

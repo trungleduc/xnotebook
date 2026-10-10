@@ -209,21 +209,30 @@ async function runCell(ctx: IExecContext, index: number, cell: ICell): Promise<I
   return { status: 'ok', error: null };
 }
 
-/** Copy rw mounts back out of the kernel filesystem. */
-async function collectMounts(job: IJob, kernel: KernelClient): Promise<IRunResult['mounts']> {
-  if (kernel.dead || !(job.mounts ?? []).some(m => m.mode === 'rw')) {
-    return [];
-  }
+/** Send one message to the kernel worker and wait for its `reply` message. */
+function workerCall(kernel: KernelClient, msg: Record<string, any>, reply: string): Promise<any> {
   return new Promise(resolve => {
     const onMsg = (ev: MessageEvent) => {
-      if (ev.data?.xnb === 'collected') {
+      if (ev.data?.xnb === reply) {
         kernel.worker.removeEventListener('message', onMsg);
-        resolve(ev.data.mounts);
+        resolve(ev.data);
       }
     };
     kernel.worker.addEventListener('message', onMsg);
-    kernel.worker.postMessage({ xnb: 'collect' });
+    kernel.worker.postMessage(msg);
   });
+}
+
+function hasRwMounts(job: IJob): boolean {
+  return (job.mounts ?? []).some(m => m.mode === 'rw');
+}
+
+/** Copy rw mounts back out of the kernel filesystem (all files, or only changed ones). */
+async function collectMounts(job: IJob, kernel: KernelClient, changed = false): Promise<IRunResult['mounts']> {
+  if (kernel.dead || !hasRwMounts(job)) {
+    return [];
+  }
+  return (await workerCall(kernel, { xnb: 'collect', changed }, 'collected')).mounts;
 }
 
 async function execute(
@@ -285,11 +294,22 @@ interface ICellReport {
   error: string | null;
   executionCount: number | null;
   outputs: Output[];
+  /** Files under rw mounts that changed during the cell. */
+  mounts?: IRunResult['mounts'];
+}
+
+/** A host command for an interactive session; exactly one field is set. */
+interface ICommand {
+  code?: string;
+  /** Read a file (or list a directory) of the kernel filesystem. */
+  read?: string;
+  maxBytes?: number;
+  close?: boolean;
 }
 
 /**
- * Interactive session: ask the host for one cell at a time (`next`) until it says close
- * or the kernel dies. Every `next` request carries the report of the previous cell.
+ * Interactive session: ask the host for one command at a time (`next`) until it says
+ * close or the kernel dies. Every `next` request carries the result of the previous one.
  */
 async function interactive(job: IJob, nb: INotebook, kernel: KernelClient, spec: any): Promise<IRunResult> {
   // Outputs travel back with the cell report; no need to stream them as events too.
@@ -298,26 +318,34 @@ async function interactive(job: IJob, nb: INotebook, kernel: KernelClient, spec:
   nb.cells = [];
   const ctx: IExecContext = { kernel, tracker, cellTimeout: job.cellTimeout ?? null, stopOnError: false };
 
-  let last: ICellReport | null = null;
+  let last: ICellReport | Record<string, any> | null = null;
   let status: IRunResult['status'] = 'ok';
   let failedCell: number | null = null;
   let error: string | null = null;
   for (;;) {
-    const next = await request<{ code?: string; close?: boolean }>('next', { result: last });
+    const next: ICommand = await request<ICommand>('next', { result: last });
     if (next.close) {
       last = null;
       break;
     }
+    if (next.read !== undefined) {
+      last = (await workerCall(kernel, { xnb: 'read', path: next.read, maxBytes: next.maxBytes ?? 0 }, 'read-result')).result;
+      continue;
+    }
     const cell: ICell = { cell_type: 'code', source: next.code ?? '', metadata: {}, outputs: [], execution_count: null };
     const index = nb.cells.push(cell) - 1;
     const run = await runCell(ctx, index, cell);
-    last = {
+    const report: ICellReport = {
       cell: index,
       status: run.status,
       error: run.error,
       executionCount: cell.execution_count ?? null,
       outputs: cell.outputs ?? []
     };
+    if (hasRwMounts(job) && !kernel.dead) {
+      report.mounts = await collectMounts(job, kernel, true);
+    }
+    last = report;
     if (run.status === 'timeout' || run.status === 'dead') {
       status = run.status === 'timeout' ? 'timeout' : 'error';
       failedCell = index;
@@ -326,7 +354,7 @@ async function interactive(job: IJob, nb: INotebook, kernel: KernelClient, spec:
     }
   }
   ensureCellIds(nb);
-  const mounts = await collectMounts(job, kernel);
+  const mounts = await collectMounts(job, kernel, true);
   return { notebook: nb, status, failedCell, error, mounts, last };
 }
 

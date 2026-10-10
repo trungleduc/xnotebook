@@ -257,7 +257,7 @@ def cache_command(
 
 @app.command("mcp")
 def mcp_command(
-    mounts: Annotated[Optional[List[str]], typer.Option("--mount", metavar="SRC:DST[:ro]", help="Expose host files to every kernel, read-only (copied in when a kernel starts).")] = None,
+    mounts: Annotated[Optional[List[str]], typer.Option("--mount", metavar="SRC:DST[:ro|rw]", help="Expose host files to every kernel (copied in when it starts); rw mounts are written back after every call.")] = None,
     cwd: Annotated[Optional[str], typer.Option("--cwd", help="Kernel working directory (default /home/xnb).")] = None,
     channels: Annotated[Optional[List[str]], typer.Option("-c", "--channel", help="Channel (repeatable).")] = None,
     cell_timeout: Annotated[float, typer.Option("--cell-timeout", help="Per-cell timeout in seconds; a timeout ends the session (0: none).")] = 120,
@@ -276,11 +276,9 @@ def mcp_command(
 
     for spec in mounts or []:
         try:
-            m = parse_mount(spec)
+            parse_mount(spec)
         except MountError as e:
             _fail(str(e), 2)
-        if m.mode != "ro":
-            _fail(f"--mount {spec}: mounts are read-only in mcp mode", 2)
     if max_sessions < 1:
         _fail("--max-sessions must be at least 1", 2)
     serve_stdio(
