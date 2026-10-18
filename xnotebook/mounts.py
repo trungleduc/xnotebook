@@ -7,7 +7,7 @@ import os
 import posixpath
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List
+from typing import Callable, Dict, List, Optional
 
 MAX_MOUNT_BYTES = 512 << 20
 MAX_WRITEBACK_FILE = 256 << 20
@@ -78,8 +78,15 @@ def mount_to_job(m: Mount) -> dict:
     return {"dst": m.dst, "mode": m.mode, "files": files, "dirs": dirs}
 
 
-def write_back(m: Mount, files: List[Dict[str, str]]) -> List[Path]:
-    """Write files reported by the kernel for an rw mount, confined to the mount source."""
+def write_back(
+    m: Mount,
+    files: List[Dict[str, str]],
+    before_write: Optional[Callable[[Path, Optional[bytes], bytes], None]] = None,
+) -> List[Path]:
+    """Write files reported by the kernel for an rw mount, confined to the mount source.
+
+    `before_write(target, old, new)` runs before each file is replaced (`old` is None for a
+    new file)."""
     written: List[Path] = []
     total = 0
     root = m.src if m.src.is_dir() else m.src.parent
@@ -119,8 +126,11 @@ def write_back(m: Mount, files: List[Dict[str, str]]) -> List[Path]:
             raise MountError(f"refusing to write outside the mount: {target}")
         if target.exists() and not target.is_file():
             continue
-        if target.exists() and target.read_bytes() == data:
+        old = target.read_bytes() if target.exists() else None
+        if old == data:
             continue
+        if before_write is not None:
+            before_write(target, old, data)
         tmp = target.with_name(f".{target.name}.xnb-tmp")
         with open(tmp, "wb") as out:
             out.write(data)

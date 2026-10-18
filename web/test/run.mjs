@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { agentOptions } from '../agent-build.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const out = fs.mkdtempSync(path.join(os.tmpdir(), 'xnb-web-test-'));
@@ -19,6 +20,8 @@ for (const f of files) {
     platform: 'node',
     format: 'cjs',
     logLevel: 'warning',
+    // pi's edit engine, as the agent worker bundles it (Node itself provides the built-ins here).
+    alias: agentOptions(path.resolve(here, '..')).alias,
     external: ['node:*']
   });
   built.push(outfile);

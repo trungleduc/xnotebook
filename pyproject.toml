@@ -35,7 +35,7 @@ packages = ["xnotebook"]
 artifacts = ["xnotebook/_web/**"]
 
 [tool.hatch.build.targets.sdist]
-include = ["xnotebook", "web/src", "web/build.mjs", "web/package.json", "web/package-lock.json", "web/tsconfig.json", "hatch_build.py", "tests", "README.md", "PLAN.md"]
+include = ["xnotebook", "web/src", "web/build.mjs", "web/agent-build.mjs", "web/package.json", "web/package-lock.json", "web/tsconfig.json", "hatch_build.py", "tests", "README.md", "PLAN.md"]
 
 [tool.hatch.build.hooks.custom]
 path = "hatch_build.py"

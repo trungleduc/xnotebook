@@ -3,6 +3,7 @@ import * as esbuild from 'esbuild';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { agentOptions } from './agent-build.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const out = path.resolve(here, '../xnotebook/_web');
@@ -35,6 +36,13 @@ await esbuild.build({
   outfile: path.join(out, 'kernel.worker.js'),
   format: 'iife'
 });
+await esbuild.build({
+  ...common,
+  entryPoints: [path.join(here, 'src/kernel.host.worker.ts')],
+  outfile: path.join(out, 'kernel.host.worker.js'),
+  format: 'iife'
+});
+await esbuild.build({ ...common, ...agentOptions(here), outfile: path.join(out, 'agent.worker.js'), format: 'iife' });
 fs.copyFileSync(path.join(here, 'src/index.html'), path.join(out, 'index.html'));
 fs.copyFileSync(
   path.join(here, 'node_modules/@emscripten-forge/untarjs/lib/unpack.wasm'),

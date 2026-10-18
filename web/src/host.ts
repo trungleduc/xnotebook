@@ -9,6 +9,10 @@ declare global {
     __xnbReply?: (msg: { id: number; value: any; error: string | null }) => void;
     /** Bridge mode: the host delivers a Jupyter message for the kernel. */
     __xnbKernel?: (msg: any) => void;
+    /** Agent mode: a command from `xnb agent` (chat, abort, reset, restart, notebook, close). */
+    __xnbAgent?: (cmd: any) => void;
+    /** Agent mode: part of the reply to a model request. */
+    __xnbLlm?: (reply: any) => void;
   }
 }
 

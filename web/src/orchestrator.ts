@@ -4,12 +4,13 @@
 import { ILock } from '@emscripten-forge/mambajs-core';
 import { computeLockId } from '@emscripten-forge/mambajs-core';
 import { debug, emit, progress, request, send, step } from './host';
-import { mergeEnv } from './deps';
+import { condaName, IMergedEnv, mergeEnv } from './deps';
 import { channelUrls, downloadAll, formatBytes, lockChannelUrls, lockFiles, solveEnv } from './solve';
 import { IKernelMessage, KernelClient, makeMessage, normalizeEname, OutputTracker } from './executor';
 import { ensureCellIds, parseNotebook, scriptToNotebook, sourceText } from './formats';
 import { WidgetStateTracker } from './widgets';
-import { ICell, IJob, INotebook, IRunResult, Output } from './types';
+import { within } from './agent/paths';
+import { ICell, IJob, IMount, INotebook, IRunResult, Output } from './types';
 
 /** Control words (state, length) followed by the JSON of the input_reply. */
 const STDIN_BUFFER_BYTES = 8 + (1 << 20);
@@ -24,8 +25,15 @@ async function fetchBytes(url: string): Promise<ArrayBuffer> {
 
 async function main(): Promise<void> {
   const job: IJob = await (await fetch('job.json')).json();
-  // Everything the sealed phase needs from the bundle is loaded now.
-  const worker = new Worker('kernel.worker.js');
+  // Everything the sealed phase needs from the bundle is loaded now. In agent mode the
+  // kernel runs under a supervisor (so that it can be restarted after the seal), next to
+  // the agent worker.
+  const worker = new Worker(job.agent ? 'kernel.host.worker.js' : 'kernel.worker.js');
+  const agentWorker = job.agent ? new Worker('agent.worker.js') : null;
+  const loaded = job.agent ? Promise.all([loadedSignal(worker, 'the kernel supervisor'), loadedSignal(agentWorker as Worker, 'the agent worker')]) : null;
+  if (job.agent) {
+    worker.postMessage({ xnb: 'source', source: await (await fetch('kernel.worker.js')).text() });
+  }
   worker.addEventListener('message', ev => {
     if (ev.data?.xnb === 'step') {
       (ev.data.info ? progress : step)(ev.data.message);
@@ -76,6 +84,7 @@ async function main(): Promise<void> {
   step(`fetched in ${((performance.now() - tFetch) / 1000).toFixed(1)}s`);
 
   // --- seal: from here on, no network for anyone, the proxy included ---
+  await loaded;
   await request('seal');
   progress('sealed: network disabled');
   progress(`starting kernel ${env.kernelName || env.kernelPackage}...`);
@@ -83,21 +92,9 @@ async function main(): Promise<void> {
 
   // Bridge mode: input() blocks the worker on this buffer until the frontend answers.
   const stdinBuffer = job.bridge && crossOriginIsolated ? new SharedArrayBuffer(STDIN_BUFFER_BYTES) : null;
-  const kernel = new KernelClient(worker);
+  const kernel = job.agent ? new KernelClient(worker, () => worker.postMessage({ xnb: 'kill' })) : new KernelClient(worker);
   kernel.onDebug = m => debug(m);
-  const ready = new Promise<any>((resolve, reject) => {
-    const onMsg = (ev: MessageEvent) => {
-      if (ev.data?.xnb === 'ready') {
-        worker.removeEventListener('message', onMsg);
-        resolve(ev.data.spec);
-      } else if (ev.data?.xnb === 'fatal') {
-        worker.removeEventListener('message', onMsg);
-        reject(new Error(`kernel failed to start: ${ev.data.message}`));
-      }
-    };
-    worker.addEventListener('message', onMsg);
-    worker.addEventListener('error', ev => reject(new Error(`kernel worker error: ${ev.message}`)));
-  });
+  const ready = waitReady(worker);
   worker.postMessage(
     {
       xnb: 'boot',
@@ -119,10 +116,43 @@ async function main(): Promise<void> {
 
   const result = job.bridge
     ? await bridge(job, nb, kernel, stdinBuffer)
-    : job.interactive
+    : job.agent
+      ? await agentSession(job, nb, worker, kernel, spec, agentWorker as Worker, requestedPackages(env, lock))
+      : job.interactive
       ? await interactive(job, nb, kernel, spec)
       : await execute(job, nb, kernel, spec, lock);
   send({ type: 'done', result });
+}
+
+/** Resolves when a worker reports that its script has loaded (before the seal). */
+function loadedSignal(worker: Worker, name: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const onMsg = (ev: MessageEvent) => {
+      if (ev.data?.xnb === 'loaded') {
+        worker.removeEventListener('message', onMsg);
+        resolve();
+      }
+    };
+    worker.addEventListener('message', onMsg);
+    worker.addEventListener('error', ev => reject(new Error(`${name} failed to load: ${ev.message}`)), { once: true });
+  });
+}
+
+/** The kernelspec of a booting kernel, once it is ready. */
+function waitReady(worker: Worker): Promise<any> {
+  return new Promise<any>((resolve, reject) => {
+    const onMsg = (ev: MessageEvent) => {
+      if (ev.data?.xnb === 'ready') {
+        worker.removeEventListener('message', onMsg);
+        resolve(ev.data.spec);
+      } else if (ev.data?.xnb === 'fatal') {
+        worker.removeEventListener('message', onMsg);
+        reject(new Error(`kernel failed to start: ${ev.data.message}`));
+      }
+    };
+    worker.addEventListener('message', onMsg);
+    worker.addEventListener('error', ev => reject(new Error(`kernel worker error: ${ev.message}`)), { once: true });
+  });
 }
 
 interface IExecContext {
@@ -364,6 +394,233 @@ async function interactive(job: IJob, nb: INotebook, kernel: KernelClient, spec:
   ensureCellIds(nb);
   const mounts = await collectMounts(job, kernel, true);
   return { notebook: nb, status, failedCell, error, mounts, last };
+}
+
+/** The packages the user asked for, with their solved versions (for the agent's prompt). */
+function requestedPackages(env: IMergedEnv, lock: ILock): string[] {
+  const conda = new Map(Object.values(lock.packages).map(p => [p.name.toLowerCase(), p.version]));
+  const pip = new Map(Object.values(lock.pipPackages ?? {}).map((p: any) => [String(p.name).toLowerCase(), p.version]));
+  const out: string[] = [];
+  for (const spec of env.specs) {
+    const name = condaName(spec);
+    out.push(conda.has(name) ? `${name} ${conda.get(name)}` : spec);
+  }
+  for (const spec of env.pipSpecs) {
+    const name = condaName(spec);
+    out.push(pip.has(name) ? `${name} ${pip.get(name)} (pip)` : `${spec} (pip)`);
+  }
+  return out;
+}
+
+/**
+ * Agent session: the agent worker drives the kernel. The host sends chat and control
+ * commands through `__xnbAgent` and model replies through `__xnbLlm`; the page sends the
+ * agent's events, its model requests (`llm`) and file write-backs to the host.
+ */
+async function agentSession(
+  job: IJob,
+  nb: INotebook,
+  worker: Worker,
+  first: KernelClient,
+  spec: any,
+  agentWorker: Worker,
+  packages: string[]
+): Promise<IRunResult> {
+  const config = job.agent!;
+  const cwd = job.cwd ?? '/home/xnb';
+  /** Events for the `xnb agent` terminal (cell events from runCell go to `emit`). */
+  const agentEvent = (event: Record<string, any>) => send({ type: 'agent', event });
+  let kernel = first;
+  let restarts = 0;
+  const tracker = new OutputTracker(() => {});
+  await describeKernel(nb, kernel, spec);
+  nb.cells = [];
+
+  // File operations, answered by the kernel worker; a dead kernel fails them all.
+  let fsId = 0;
+  const fsPending = new Map<number, (r: any) => void>();
+  worker.addEventListener('message', ev => {
+    if (ev.data?.xnb === 'fs-result') {
+      const done = fsPending.get(ev.data.id);
+      fsPending.delete(ev.data.id);
+      done?.(ev.data);
+    }
+  });
+  const dead = () => ({ error: `the kernel is dead (${kernel.dead}); call restart_kernel`, code: 'EDEAD' });
+  const watch = (k: KernelClient) =>
+    k.onDead(reason => {
+      for (const done of fsPending.values()) {
+        done(dead());
+      }
+      fsPending.clear();
+      if (reason !== 'restarted') {
+        agentEvent({ kind: 'kernel_dead', reason });
+      }
+    });
+  watch(kernel);
+  const fsCall = (args: Record<string, any>): Promise<any> =>
+    kernel.dead
+      ? Promise.resolve(dead())
+      : new Promise(resolve => {
+          const id = ++fsId;
+          fsPending.set(id, resolve);
+          worker.postMessage({ xnb: 'fs', id, ...args });
+        });
+  const readOnly = (path: string): IMount | undefined =>
+    (job.mounts ?? []).find(m => m.mode === 'ro' && within(path, m.dst));
+
+  /** Send files changed under rw mounts to the host; returns the host paths it saved. */
+  const saveChanges = async (): Promise<string[]> => {
+    if (!hasRwMounts(job) || kernel.dead) {
+      return [];
+    }
+    const changed = await Promise.race([
+      collectMounts(job, kernel, true),
+      new Promise<IRunResult['mounts']>(resolve => kernel.onDead(() => resolve([])))
+    ]);
+    if (!changed?.some(m => m.files.length)) {
+      return [];
+    }
+    return (await request<{ saved: string[] }>('writeback', { mounts: changed })).saved ?? [];
+  };
+
+  const restart = async (): Promise<{ ok: boolean; message: string }> => {
+    if (restarts >= config.maxRestarts) {
+      return { ok: false, message: `restart limit reached (--max-restarts ${config.maxRestarts}); the kernel cannot be restarted again` };
+    }
+    restarts++;
+    const fresh = await request<{ mounts: IMount[] }>('remount');
+    const t = performance.now();
+    kernel.dispose();
+    kernel.die('restarted');
+    kernel = new KernelClient(worker, () => worker.postMessage({ xnb: 'kill' }));
+    kernel.onDebug = m => debug(m);
+    watch(kernel);
+    const ready = waitReady(worker);
+    worker.postMessage({ xnb: 'restart', mounts: fresh.mounts });
+    try {
+      await ready;
+    } catch (e: any) {
+      kernel.die(String(e?.message ?? e));
+      return { ok: false, message: String(e?.message ?? e) };
+    }
+    const seconds = (performance.now() - t) / 1000;
+    agentEvent({ kind: 'kernel_restarted', seconds });
+    return {
+      ok: true,
+      message: `fresh kernel started in ${seconds.toFixed(1)}s; variables are gone, and the mounts were copied in again from the host`
+    };
+  };
+
+  const ops: Record<string, (args: any) => Promise<any>> = {
+    execute: async ({ code }) => {
+      const cell: ICell = { cell_type: 'code', source: code ?? '', metadata: {}, outputs: [], execution_count: null };
+      if (kernel.dead) {
+        return { status: 'dead', error: kernel.dead, outputs: [], executionCount: null };
+      }
+      const index = nb.cells.push(cell) - 1;
+      const ctx: IExecContext = { kernel, tracker, cellTimeout: job.cellTimeout ?? null, stopOnError: false };
+      const run = await runCell(ctx, index, cell);
+      const saved = await saveChanges();
+      return { cell: index, status: run.status, error: run.error, executionCount: cell.execution_count ?? null, outputs: cell.outputs ?? [], saved };
+    },
+    fs: async args => (args.op === 'read' || args.op === 'stat' || args.op === 'list' ? fsCall(args) : { error: `unknown file operation ${args.op}`, code: 'EINVAL' }),
+    write: async ({ path, text }) => {
+      const ro = readOnly(path);
+      if (ro) {
+        throw new Error(`${path} is in the read-only mount ${ro.dst}; changes there are never saved. Write somewhere else.`);
+      }
+      const r = await fsCall({ op: 'write', path, text });
+      if (r.error) {
+        throw new Error(r.error);
+      }
+      return saveChanges();
+    },
+    restart
+  };
+
+  // One operation at a time: the agent's tools and the host's /restart share the kernel.
+  let queue: Promise<any> = Promise.resolve();
+  const run = (op: string, args: any): Promise<any> => {
+    const fn = ops[op];
+    const p = queue.then(() => (fn ? fn(args) : Promise.reject(new Error(`unknown operation ${op}`))));
+    queue = p.catch(() => undefined);
+    return p;
+  };
+
+  agentWorker.addEventListener('message', ev => {
+    const m = ev.data;
+    switch (m?.xnb) {
+      case 'agent-event':
+        send({ type: 'agent', event: m.event });
+        break;
+      case 'call':
+        run(m.op, m.args).then(
+          value => agentWorker.postMessage({ xnb: 'reply', id: m.id, value }),
+          e => agentWorker.postMessage({ xnb: 'reply', id: m.id, error: String(e?.message ?? e) })
+        );
+        break;
+      case 'llm':
+        send({ type: 'llm', reqId: m.reqId, method: m.method, path: m.path, headers: m.headers, body: m.body });
+        break;
+      case 'llm-abort':
+        send({ type: 'llm_abort', reqId: m.reqId });
+        break;
+    }
+  });
+  window.__xnbLlm = reply => agentWorker.postMessage({ xnb: 'llm-reply', reply });
+
+  const started = new Promise<void>((resolve, reject) => {
+    const onMsg = (ev: MessageEvent) => {
+      if (ev.data?.xnb === 'agent-ready') {
+        agentWorker.removeEventListener('message', onMsg);
+        resolve();
+      } else if (ev.data?.xnb === 'agent-fatal') {
+        agentWorker.removeEventListener('message', onMsg);
+        reject(new Error(`the agent failed to start: ${ev.data.message}`));
+      }
+    };
+    agentWorker.addEventListener('message', onMsg);
+    agentWorker.addEventListener('error', ev => reject(new Error(`agent worker error: ${ev.message}`)), { once: true });
+  });
+  const mounts = (job.mounts ?? []).map(m => ({ dst: m.dst, mode: m.mode }));
+  agentWorker.postMessage({ xnb: 'init', init: { config, cwd, mounts, kernel: spec, packages } });
+  await started;
+
+  const closed = new Promise<void>(resolve => {
+    window.__xnbAgent = (cmd: any) => {
+      switch (cmd?.type) {
+        case 'chat':
+          agentWorker.postMessage({ xnb: 'chat', text: String(cmd.text ?? '') });
+          break;
+        case 'abort':
+        case 'reset':
+          agentWorker.postMessage({ xnb: cmd.type });
+          break;
+        case 'restart':
+          run('restart', {}).then(
+            r => agentEvent({ kind: 'restart_result', ...r }),
+            e => agentEvent({ kind: 'restart_result', ok: false, message: String(e?.message ?? e) })
+          );
+          break;
+        case 'notebook':
+          ensureCellIds(nb);
+          send({ type: 'agent', event: { kind: 'notebook', notebook: nb } });
+          break;
+        case 'close':
+          resolve();
+          break;
+      }
+    };
+  });
+  agentEvent({ kind: 'agent_ready', spec, packages, cwd, mounts });
+  await closed;
+  agentWorker.postMessage({ xnb: 'abort' });
+  window.__xnbAgent = undefined;
+  window.__xnbLlm = undefined;
+  ensureCellIds(nb);
+  await queue.then(saveChanges).catch(() => undefined);
+  return { notebook: nb, status: 'ok', mounts: [] };
 }
 
 function toBase64(data: Uint8Array): string {

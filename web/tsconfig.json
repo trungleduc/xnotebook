@@ -8,7 +8,11 @@
     "skipLibCheck": true,
     "noEmit": true,
     "esModuleInterop": true,
-    "types": []
+    "types": [],
+    "paths": {
+      "pi-edit-diff": ["./node_modules/@earendil-works/pi-coding-agent/dist/core/tools/edit-diff.d.ts"],
+      "pi-text": ["./node_modules/@earendil-works/pi-coding-agent/dist/utils/text.d.ts"]
+    }
   },
   "include": ["src/**/*.ts"]
 }

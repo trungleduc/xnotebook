@@ -418,6 +418,59 @@ function readPath(path: string, maxBytes: number): Record<string, any> {
   return { path: abs, size: st.size, data: b64encode(FS.readFile(abs)) };
 }
 
+/**
+ * File operations for the agent's read/edit/write tools, on the kernel filesystem.
+ * Errors carry a Node-style `code` (ENOENT, EISDIR, ...) so the tools can explain them.
+ */
+function fsOp(msg: any): Record<string, any> {
+  const FS = ctx.Module?.FS;
+  if (!FS) {
+    return { error: 'the kernel filesystem is not ready', code: 'EAGAIN' };
+  }
+  const path: string = msg.path;
+  try {
+    switch (msg.op) {
+      case 'stat': {
+        const st = FS.stat(path);
+        return { value: { dir: FS.isDir(st.mode), file: FS.isFile(st.mode), size: st.size } };
+      }
+      case 'list': {
+        const base = path.replace(/\/$/, '');
+        const entries = FS.readdir(path)
+          .filter((n: string) => n !== '.' && n !== '..')
+          .map((name: string) => {
+            const child = FS.stat(`${base}/${name}`);
+            return { name, dir: FS.isDir(child.mode), size: child.size };
+          });
+        return { value: entries };
+      }
+      case 'read': {
+        const st = FS.stat(path);
+        if (FS.isDir(st.mode)) {
+          return { error: `${path} is a directory`, code: 'EISDIR' };
+        }
+        if (st.size > msg.maxBytes) {
+          return { error: `${path} is ${st.size} bytes; the limit is ${msg.maxBytes}`, code: 'EFBIG' };
+        }
+        return { value: b64encode(FS.readFile(path)) };
+      }
+      case 'write': {
+        const dir = path.substring(0, path.lastIndexOf('/')) || '/';
+        FS.mkdirTree(dir);
+        FS.writeFile(path, new TextEncoder().encode(msg.text));
+        return { value: true };
+      }
+      case 'mkdir':
+        FS.mkdirTree(path);
+        return { value: true };
+    }
+    return { error: `unknown file operation ${msg.op}`, code: 'EINVAL' };
+  } catch (e: any) {
+    const code = e?.code ?? (e?.errno === 44 ? 'ENOENT' : 'EIO');
+    return { error: `${code === 'ENOENT' ? 'no such file or directory' : String(e?.message ?? e)}: ${path}`, code };
+  }
+}
+
 // pyodide-http (loaded by xeus-python to patch urllib/requests) starts a streaming-HTTP
 // helper worker whenever the page is cross-origin isolated, through a Pyodide-only to_js()
 // option that pyjs lacks, so the kernel fails to start. A sealed kernel has nothing to
@@ -483,6 +536,9 @@ ctx.onmessage = (ev: MessageEvent) => {
       } else if (msg.xnb === 'read') {
         await flushToplevel();
         post({ xnb: 'read-result', result: readPath(msg.path, msg.maxBytes) });
+      } else if (msg.xnb === 'fs') {
+        await flushToplevel();
+        post({ xnb: 'fs-result', id: msg.id, ...fsOp(msg) });
       }
     } catch (e: any) {
       post({ xnb: 'fatal', message: describeError(e) });
