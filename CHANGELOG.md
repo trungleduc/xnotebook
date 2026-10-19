@@ -1,3 +1,10 @@
+# [1.4.0](https://github.com/trungleduc/xnotebook/compare/v1.3.0...v1.4.0) (2026-10-19)
+
+
+### Features
+
+* agent ([a4125f5](https://github.com/trungleduc/xnotebook/commit/a4125f58e9406cf8677a727ef5502fce71882a8a))
+
 # [1.3.0](https://github.com/trungleduc/xnotebook/compare/v1.2.0...v1.3.0) (2026-10-10)
 
 

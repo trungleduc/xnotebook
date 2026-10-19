@@ -1,6 +1,6 @@
 """xnb: run notebooks and scripts on sandboxed xeus wasm kernels inside headless Chromium."""
 
-__version__ = "1.3.0"
+__version__ = "1.4.0"
 
 from .api import CellError, RunError, run  # noqa: E402
 
