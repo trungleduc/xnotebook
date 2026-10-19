@@ -163,9 +163,22 @@ export class KernelClient {
   /** Called for every kernel message, whatever request it belongs to. */
   onAnyMessage: (msg: IKernelMessage) => void = () => {};
 
-  constructor(public worker: Worker) {
-    worker.addEventListener('message', ev => this.handle(ev.data));
-    worker.addEventListener('error', ev => this.die(`kernel worker error: ${ev.message}`));
+  private onMessage = (ev: MessageEvent) => this.handle(ev.data);
+  private onError = (ev: ErrorEvent) => this.die(`kernel worker error: ${ev.message}`);
+
+  /** `kill` stops the kernel (default: terminate the worker; the agent's supervisor kills its nested kernel). */
+  constructor(
+    public worker: Worker,
+    private kill: () => void = () => worker.terminate()
+  ) {
+    worker.addEventListener('message', this.onMessage);
+    worker.addEventListener('error', this.onError);
+  }
+
+  /** Stop listening to the worker (a restarted kernel gets a new client). */
+  dispose(): void {
+    this.worker.removeEventListener('message', this.onMessage);
+    this.worker.removeEventListener('error', this.onError);
   }
 
   private handle(data: any): void {
@@ -212,7 +225,7 @@ export class KernelClient {
   }
 
   terminate(reason: string): void {
-    this.worker.terminate();
+    this.kill();
     this.die(reason);
   }
 

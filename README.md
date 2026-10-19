@@ -66,7 +66,8 @@ Notebook code runs in a Web Worker inside Chromium:
 - **Files:** the kernel sees only an in-memory filesystem, so the host disk is out of
   reach. `--mount src:/dst` copies files in. `:rw` mounts are written back after the
   run, and only as regular files under `src`: no symlinks, no `..`, with size caps.
-- **Network:** none for notebook code.
+- **Network:** none for notebook code (and none for the `xnb agent` worker, whose model
+  requests go through the host).
   - Packages are fetched *before* any package or user code runs. Everything goes through
     a local caching proxy that verifies each file against the lock's sha256.
   - Then the run is **sealed**. The host firewall (CDP `Fetch` interception) denies every
@@ -93,6 +94,10 @@ xnb setup [--from chrome-headless-shell.zip]
 xnb cache {info,clean,prune}
 xnb mcp [--mount SRC:DST[:ro|rw]]... [--cwd DIR] [-c CHANNEL]... [--cell-timeout S] [--idle-timeout S]
         [--max-sessions N] [--max-memory MB] [--strict] [--offline] [--browser-path PATH] [--cache-dir DIR] [--debug]
+xnb agent [-p PROMPT] [-e ENV.yaml] [-d SPEC]... [--pip SPEC]... [--kernel NAME] [--mount SRC:DST[:ro|rw]]... [--cwd DIR]
+          [--provider anthropic|openai] [--base-url URL] [--model ID] [--effort LEVEL] [--compat KEY=VALUE]...
+          [--max-requests N] [--max-tokens-total N] [--cell-timeout S] [--max-restarts N]
+          [--json] [--images-dir DIR] [--save FILE.ipynb] [--system FILE] [--no-images] [--strict] [--debug]
 xnb kernel install --name NAME [--display-name TEXT] [-e ENV.yaml] [-d SPEC]... [--pip SPEC]... [-c CHANNEL]...
         [--kernel NAME] [--mount SRC:DST[:ro|rw]]... [--cwd DIR] [--cell-timeout S] [--max-memory MB] [--strict]
         [--user | --sys-prefix | --prefix DIR]
@@ -149,6 +154,52 @@ Outputs come back as text, with plots as images. Errors set `isError`.
 The first `session_start` on a cold cache downloads the browser and the packages. Running
 `xnb setup` and one `xnb` run beforehand keeps tool calls fast.
 
+## Agent
+
+`xnb agent` is a chat in the terminal with an agent that runs **inside the sandbox**. Its
+loop ([pi](https://www.npmjs.com/package/@earendil-works/pi-agent-core)) runs in a browser
+worker next to a sealed kernel. It runs code, reads and edits files there, and restarts the
+kernel when a cell kills it.
+
+```console
+$ export ANTHROPIC_API_KEY=...
+$ xnb agent -d pandas -d matplotlib --mount ./data:/data:rw
+$ xnb agent -p "summarize /data/sales.csv" --mount ./data:/data > summary.md
+$ xnb agent --provider openai --base-url http://localhost:11434/v1 --model qwen3-coder
+```
+
+- **The API key stays on the host.** The agent has no network: each model request goes
+  over the DevTools bridge to xnb, which adds the key (`ANTHROPIC_API_KEY` or
+  `ANTHROPIC_AUTH_TOKEN`, `OPENAI_API_KEY`) and forwards it to the one endpoint of the
+  session. xnb only forwards the chat endpoint with the session's model. It refuses
+  anything that runs on the provider's side, such as web search, code execution or MCP
+  servers, which would be a way around the seal.
+  `--max-requests` and `--max-tokens-total` cap what a session can spend.
+- **Providers:** `--provider anthropic` (default model `claude-opus-5-5`) or
+  `--provider openai` for any OpenAI-compatible Chat Completions server (OpenAI,
+  OpenRouter, vLLM, Ollama, ...). Use `--compat KEY=VALUE` for servers with quirks.
+- **Tools:** `execute` (a notebook cell), `read`, `edit` (pi's exact-match edits), `write`
+  and `restart_kernel`. There is no shell: the kernel has no processes.
+- **Files:** what the agent changes under `:rw` mounts is saved to the host right away and
+  shown as a diff. The first time a file is overwritten in a session, its original is copied
+  to `~/.cache/xnb/backups/<session>/` (files the agent created are listed there too).
+  Writes under `:ro` mounts are refused. Files outside mounts are lost when the kernel
+  restarts.
+- **Kernel restarts:** a cell that runs past `--cell-timeout` kills the kernel (wasm cannot
+  be interrupted). The agent calls `restart_kernel` to get a fresh one with the same
+  packages (`--max-restarts`, 10 by default). The restarted kernel is as sealed as the first.
+- **Output:** the model's text goes to stdout; tool calls, diffs and progress go to
+  stderr. `--json` prints every event as one JSON line, `--images-dir DIR` saves plots,
+  and `--save FILE.ipynb` keeps the cells the agent ran.
+- **Chat commands:** `/help`, `/reset`, `/restart`, `/mounts`, `/tokens`,
+  `/save FILE.ipynb`, `/exit`. Ctrl-C interrupts the agent. A running cell still runs to its
+  end.
+- `AGENTS.md` in the current directory and `--system FILE` are added to the agent's
+  instructions.
+
+Everything the agent sees, including mounted data and cell outputs, is sent to the model
+provider. Only mount what you are willing to send.
+
 ## Jupyter kernel
 
 `xnb kernel install` adds a kernelspec, so JupyterLab, Notebook, VS Code, nbclient or
@@ -181,7 +232,8 @@ The cache lives in `~/.cache/xnb` by default (`$XNB_CACHE_DIR` overrides it):
 - `chromium/`: the pinned browser;
 - `pkgs/<sha256>`: packages, fetched lazily and immutable;
 - `repodata/`: metadata, with ETag and a 1 h TTL;
-- `locks/`: solved environments.
+- `locks/`: solved environments;
+- `backups/`: originals of files `xnb agent` overwrote.
 
 `--offline` uses only the cache, and `--refresh` re-solves and revalidates.
 

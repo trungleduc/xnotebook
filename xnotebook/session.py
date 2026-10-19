@@ -217,7 +217,7 @@ class Session:
             if kind == "console":
                 self._console(data)
                 continue
-            if kind in ("exec", "close", "kmsg"):
+            if kind != "msg":
                 self._command(conn, sid, kind, data)
                 continue
             msg = json.loads(data)
@@ -251,6 +251,8 @@ class Session:
                 if self.offline and "504" in message:
                     message += "\n(--offline: this environment is not fully cached yet; run once without --offline)"
                 raise RunError(message)
+            else:
+                self._page_request(conn, sid, msg)
 
     # -- interactive hooks (see InteractiveSession) -------------------------
     def _next(self, conn, sid: str, msg: dict) -> None:
@@ -261,6 +263,9 @@ class Session:
 
     def _page_message(self, msg: dict) -> None:
         pass
+
+    def _page_request(self, conn, sid: str, msg: dict) -> None:
+        """Any other page message (agent mode); requests carry an `id` to `_reply` to."""
 
     def _console(self, params: dict) -> None:
         if not self.debug:

@@ -39,6 +39,36 @@ export interface IJob {
   interactive?: boolean;
   /** Relay raw Jupyter messages between the host and the kernel (`xnb kernel start`). */
   bridge?: boolean;
+  /** Run an agent next to the kernel (`xnb agent`). */
+  agent?: IAgentConfig | null;
+}
+
+/** `xnb agent` settings. No secrets: the host adds the API key to every model request. */
+export interface IAgentConfig {
+  provider: 'anthropic' | 'openai';
+  model: string;
+  /** OpenAI-compatible provider: the host forwards to api.openai.com itself. */
+  openaiOfficial?: boolean;
+  /** Reasoning effort (low ... max); null leaves it to the model. */
+  effort?: string | null;
+  maxTokens?: number | null;
+  /** pi-ai compat settings for unusual OpenAI-compatible servers. */
+  compat?: Record<string, any>;
+  /** Send plots and images to the model. */
+  images: boolean;
+  /** Extra system prompt (--system, AGENTS.md). */
+  system?: string | null;
+  maxRestarts: number;
+  sessionId: string;
+}
+
+/** What the agent worker is told about its sandbox when it starts. */
+export interface IAgentInit {
+  config: IAgentConfig;
+  cwd: string;
+  mounts: { dst: string; mode: 'ro' | 'rw' }[];
+  kernel: { name: string; display_name: string; language?: string };
+  packages: string[];
 }
 
 export type Output = Record<string, any>;

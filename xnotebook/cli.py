@@ -1,4 +1,4 @@
-"""Command line interface (Typer): `xnb <file> [options]`, `xnb setup`, `xnb cache ...`, `xnb mcp`, `xnb kernel ...`."""
+"""Command line interface (Typer): `xnb <file> [options]`, `xnb setup`, `xnb cache ...`, `xnb mcp`, `xnb agent`, `xnb kernel ...`."""
 
 from __future__ import annotations
 
@@ -236,7 +236,7 @@ class CacheAction(str, Enum):
 
 @app.command("cache")
 def cache_command(
-    action: Annotated[CacheAction, typer.Argument(help="info: sizes; clean: remove packages and metadata; prune: drop metadata and locks.")],
+    action: Annotated[CacheAction, typer.Argument(help="info: sizes; clean: remove packages, metadata and `xnb agent` backups; prune: drop metadata and locks.")],
     all_: Annotated[bool, typer.Option("--all", help="With clean: also remove Chromium.")] = False,
     cache_dir: Annotated[Optional[Path], typer.Option("--cache-dir", help="Cache directory.")] = None,
 ) -> None:
@@ -247,7 +247,7 @@ def cache_command(
         return
     targets = [cache.repodata, cache.locks, cache.tmp]
     if action == CacheAction.clean:
-        targets.append(cache.pkgs)
+        targets += [cache.pkgs, cache.backups]
         if all_:
             targets.append(cache.chromium)
     for t in targets:
@@ -297,6 +297,135 @@ def mcp_command(
             debug=debug,
         )
     )
+
+
+class AgentProvider(str, Enum):
+    anthropic = "anthropic"
+    openai = "openai"
+
+
+MODEL = "Model"
+
+
+@app.command("agent")
+def agent_command(
+    prompt: Annotated[Optional[str], typer.Option("-p", "--prompt", help="Run this one prompt and exit (no chat).", rich_help_panel=OUT)] = None,
+    env_file: Annotated[Optional[Path], typer.Option("-e", "--env", help="environment.yaml.", rich_help_panel=DEPS)] = None,
+    deps: Annotated[Optional[List[str]], typer.Option("-d", "--dep", help="Conda spec (repeatable).", rich_help_panel=DEPS)] = None,
+    pip: Annotated[Optional[List[str]], typer.Option("--pip", help="Pip spec (repeatable).", rich_help_panel=DEPS)] = None,
+    channels: Annotated[Optional[List[str]], typer.Option("-c", "--channel", help="Channel (repeatable).", rich_help_panel=DEPS)] = None,
+    kernel: Annotated[Optional[str], typer.Option("--kernel", help="Kernel name (xpython, xr, xlua, xjavascript, ...) or package.", rich_help_panel=DEPS)] = None,
+    mounts: Annotated[Optional[List[str]], typer.Option("--mount", metavar="SRC:DST[:ro|rw]", help="Expose host files to the kernel; rw files are saved back (originals backed up) as soon as they change.", rich_help_panel=EXEC)] = None,
+    cwd: Annotated[Optional[str], typer.Option("--cwd", help="Kernel working directory (default /home/xnb).", rich_help_panel=EXEC)] = None,
+    cell_timeout: Annotated[float, typer.Option("--cell-timeout", help="Per-cell timeout in seconds; a timeout kills the kernel, which the agent can restart (0: none).", rich_help_panel=EXEC)] = 120,
+    max_restarts: Annotated[int, typer.Option("--max-restarts", help="How many times the kernel may be restarted.", rich_help_panel=EXEC)] = 10,
+    max_memory: Annotated[Optional[int], typer.Option("--max-memory", metavar="MB", help="JS heap limit for the browser.", rich_help_panel=EXEC)] = None,
+    provider: Annotated[AgentProvider, typer.Option("--provider", help="Model API: anthropic, or openai for any OpenAI-compatible server.", rich_help_panel=MODEL)] = AgentProvider.anthropic,
+    base_url: Annotated[Optional[str], typer.Option("--base-url", help="Model endpoint (default: $ANTHROPIC_BASE_URL / $OPENAI_BASE_URL, else the provider's).", rich_help_panel=MODEL)] = None,
+    model: Annotated[Optional[str], typer.Option("--model", help="Model id (default claude-opus-5-5 for anthropic; required for openai).", rich_help_panel=MODEL)] = None,
+    effort: Annotated[Optional[str], typer.Option("--effort", help="Reasoning effort: off, minimal, low, medium, high, xhigh, max.", rich_help_panel=MODEL)] = None,
+    max_output_tokens: Annotated[Optional[int], typer.Option("--max-output-tokens", help="Output token limit per model reply.", rich_help_panel=MODEL)] = None,
+    compat: Annotated[Optional[List[str]], typer.Option("--compat", metavar="KEY=VALUE", help="pi-ai compat setting for unusual OpenAI-compatible servers (repeatable), e.g. supportsDeveloperRole=false.", rich_help_panel=MODEL)] = None,
+    no_images: Annotated[bool, typer.Option("--no-images", help="Send text only (for models without vision).", rich_help_panel=MODEL)] = False,
+    system: Annotated[Optional[Path], typer.Option("--system", help="File with extra instructions for the agent (AGENTS.md in the current directory is read too).", rich_help_panel=MODEL)] = None,
+    max_requests: Annotated[int, typer.Option("--max-requests", help="Stop sending model requests after this many (0: no limit).", rich_help_panel=MODEL)] = 0,
+    max_tokens_total: Annotated[int, typer.Option("--max-tokens-total", help="Stop sending model requests after this many tokens in total (0: no limit).", rich_help_panel=MODEL)] = 0,
+    json_mode: Annotated[bool, typer.Option("--json", help="Print every agent event as one JSON line on stdout.", rich_help_panel=OUT)] = False,
+    images_dir: Annotated[Optional[Path], typer.Option("--images-dir", help="Save every plot the agent makes here as a PNG.", rich_help_panel=OUT)] = None,
+    save: Annotated[Optional[Path], typer.Option("--save", help="At exit, save the cells the agent ran as a notebook.", rich_help_panel=OUT)] = None,
+    verbose: Annotated[bool, typer.Option("-v", "--verbose", help="Show every startup step with timings.", rich_help_panel=OUT)] = False,
+    strict: Annotated[bool, typer.Option("--strict", help="Refuse to run Chromium without its OS sandbox.", rich_help_panel=NET)] = False,
+    offline: Annotated[bool, typer.Option("--offline", help="Never contact package upstreams; use the cache only.", rich_help_panel=NET)] = False,
+    browser_path: Annotated[Optional[str], typer.Option("--browser-path", help="Use this Chromium/chrome-headless-shell binary.", rich_help_panel=NET)] = None,
+    cache_dir: Annotated[Optional[Path], typer.Option("--cache-dir", help="Cache directory (default ~/.cache/xnb or $XNB_CACHE_DIR).", rich_help_panel=NET)] = None,
+    debug: Annotated[bool, typer.Option("--debug", help="Verbose logs (firewall, proxy, page console, model requests).", rich_help_panel=NET)] = False,
+) -> None:
+    """Chat with an agent that runs inside the sandbox, next to a sealed kernel.
+
+    The model's API key stays on the host: it is added to each request on its way out.
+    """
+    from .agent import DEFAULT_MODELS, EFFORTS, build_agent_job, project_instructions, run_agent
+    from .llm import LlmError, Provider
+
+    name = provider.value
+    model_id = model or DEFAULT_MODELS.get(name)
+    if not model_id:
+        _fail(f"--model is required with --provider {name}", 2)
+    if effort is not None and effort not in EFFORTS:
+        _fail(f"--effort must be one of {', '.join(EFFORTS)}", 2)
+    compat_values = {}
+    for item in compat or []:
+        key, sep, value = item.partition("=")
+        if not sep or not key:
+            _fail(f"--compat expects KEY=VALUE, got {item!r}", 2)
+        try:
+            compat_values[key] = json.loads(value)
+        except ValueError:
+            compat_values[key] = value
+    try:
+        llm = Provider.from_env(name, model_id, base_url)
+    except LlmError as e:
+        _fail(str(e), 2)
+    extra = []
+    instructions = []
+    if system is not None:
+        try:
+            instructions.append(system.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError) as e:
+            _fail(f"cannot read --system {system}: {e}", 2)
+    agents_md = project_instructions(Path.cwd() / "AGENTS.md")
+    if agents_md:
+        instructions.append(agents_md)
+        extra.append("instructions from ./AGENTS.md")
+    try:
+        job, mount_objs = build_agent_job(
+            provider=llm,
+            effort=effort,
+            max_output_tokens=max_output_tokens,
+            compat=compat_values,
+            images=not no_images,
+            system="\n\n".join(instructions) or None,
+            max_restarts=max_restarts,
+            env_file=env_file,
+            deps=deps or [],
+            pip=pip or [],
+            channels=channels or [],
+            kernel=kernel,
+            mounts=mounts or [],
+            cwd=cwd,
+            cell_timeout=cell_timeout or None,
+        )
+    except (OSError, ValueError, MountError) as e:
+        _fail(str(e), 2)
+    quiet = prompt is not None and not verbose
+
+    def log(m: str) -> None:
+        if not quiet or debug:
+            sys.stderr.write(m + "\n")
+            sys.stderr.flush()
+
+    code = run_agent(
+        job,
+        mount_objs,
+        llm,
+        prompt=prompt,
+        json_mode=json_mode,
+        images_dir=images_dir,
+        save=save,
+        max_requests=max_requests or None,
+        max_tokens_total=max_tokens_total or None,
+        header_extra=extra,
+        cache=Cache(cache_dir) if cache_dir else None,
+        browser_path=browser_path,
+        strict=strict,
+        offline=offline,
+        max_memory_mb=max_memory,
+        log=log,
+        debug=debug,
+        verbose=verbose,
+        quiet=quiet,
+    )
+    raise typer.Exit(code)
 
 
 kernel_app = typer.Typer(help="Jupyter kernelspecs backed by sandboxed xnb kernels.", no_args_is_help=True)
@@ -392,7 +521,7 @@ def _fail(message: str, code: int) -> "typer.Exit":
     raise typer.Exit(code)
 
 
-COMMANDS = {"run", "setup", "cache", "mcp", "kernel"}
+COMMANDS = {"run", "setup", "cache", "mcp", "agent", "kernel"}
 
 
 def main(argv: Optional[List[str]] = None) -> int:

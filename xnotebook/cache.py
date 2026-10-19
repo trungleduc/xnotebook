@@ -1,4 +1,4 @@
-"""On-disk cache layout: ~/.cache/xnb/{chromium,pkgs,repodata,locks,tmp}."""
+"""On-disk cache layout: ~/.cache/xnb/{chromium,pkgs,repodata,locks,backups,tmp}."""
 
 from __future__ import annotations
 
@@ -35,6 +35,7 @@ class Cache:
         self.pkgs = self.root / "pkgs"
         self.repodata = self.root / "repodata"
         self.locks = self.root / "locks"
+        self.backups = self.root / "backups"  # originals of files `xnb agent` overwrote
         self.chromium = self.root / "chromium"
         self.tmp = self.root / "tmp"
 
@@ -96,7 +97,7 @@ class Cache:
     # -- maintenance ------------------------------------------------------
     def info(self) -> dict:
         out = {"root": str(self.root)}
-        for name in ("chromium", "pkgs", "repodata", "locks"):
+        for name in ("chromium", "pkgs", "repodata", "locks", "backups"):
             d = getattr(self, name)
             total = 0
             count = 0
